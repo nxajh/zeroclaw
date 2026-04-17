@@ -6518,6 +6518,9 @@ pub struct ChannelsConfig {
     /// WeCom (WeChat Enterprise) Bot Webhook channel configuration.
     #[nested]
     pub wecom: Option<WeComConfig>,
+    /// WeChat iLink Bot channel configuration.
+    #[nested]
+    pub wechat: Option<WechatConfig>,
     /// QQ Official Bot channel configuration.
     #[nested]
     pub qq: Option<QQConfig>,
@@ -6763,6 +6766,7 @@ impl Default for ChannelsConfig {
             feishu: None,
             dingtalk: None,
             wecom: None,
+            wechat: None,
             qq: None,
             twitter: None,
             mochat: None,
@@ -8442,6 +8446,57 @@ impl ChannelConfig for WeComConfig {
     }
     fn desc() -> &'static str {
         "WeCom Bot Webhook"
+    }
+}
+
+/// WeChat iLink Bot channel configuration
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Configurable)]
+#[cfg_attr(feature = "schema-export", derive(schemars::JsonSchema))]
+#[prefix = "channels.wechat"]
+pub struct WechatConfig {
+    /// Whether this channel is active (must be explicitly enabled). Default: false.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Base URL of the iLink Bot API.
+    /// Defaults to "https://ilinkai.weixin.qq.com" if not specified.
+    #[serde(default = "default_wechat_api_base")]
+    pub api_base: String,
+    /// AES-128-ECB key (hex-encoded, 16 bytes = 32 hex chars).
+    /// Optional: if not set, the key is expected to come from the iLink API.
+    #[serde(default)]
+    #[secret]
+    pub aes_key: Option<String>,
+    /// Long-polling timeout in seconds. Default: 35.
+    #[serde(default = "default_wechat_poll_timeout")]
+    pub poll_timeout: u64,
+    /// Bot token — obtained via QR login. If set, skips login on startup.
+    #[serde(default)]
+    #[secret]
+    pub bot_token: Option<String>,
+    /// User-agent string for HTTP requests.
+    #[serde(default = "default_wechat_user_agent")]
+    pub user_agent: String,
+    /// Allowed user IDs. Empty = deny all, "*" = allow all.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+}
+
+fn default_wechat_api_base() -> String {
+    "https://ilinkai.weixin.qq.com".to_string()
+}
+fn default_wechat_poll_timeout() -> u64 {
+    35
+}
+fn default_wechat_user_agent() -> String {
+    "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36".to_string()
+}
+
+impl ChannelConfig for WechatConfig {
+    fn name() -> &'static str {
+        "WeChat"
+    }
+    fn desc() -> &'static str {
+        "WeChat iLink Bot"
     }
 }
 

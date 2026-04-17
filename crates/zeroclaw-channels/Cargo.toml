@@ -51,6 +51,9 @@ tracing = { version = "0.1", default-features = false }
 urlencoding = "2.1"
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
 hex = "0.4"
+aes = "0.8"
+ecb = "0.1"
+md-5 = "0.10"
 nanohtml2text = "0.2"
 rand = "0.10"
 webpki-roots = "1.0.6"
@@ -68,6 +71,7 @@ wa-rs-ureq-http = { version = "0.2", optional = true }
 wa-rs-tokio-transport = { version = "0.2", optional = true, default-features = false }
 qrcode = { version = "0.14", optional = true }
 shellexpand = "3.1"
+thiserror = { version = "2.0", default-features = false }
 
 [features]
 default = [
@@ -76,7 +80,7 @@ default = [
     "channel-bluesky", "channel-twitter", "channel-reddit", "channel-notion",
     "channel-linq", "channel-wati", "channel-nextcloud", "channel-mochat",
     "channel-wecom", "channel-clawdtalk", "channel-webhook",
-    "channel-whatsapp-cloud", "channel-voice-call",
+    "channel-whatsapp-cloud", "channel-voice-call", "channel-wechat",
 ]
 # Channels with optional deps
 channel-email = ["dep:lettre", "dep:mail-parser", "dep:async-imap"]
@@ -107,6 +111,7 @@ channel-clawdtalk = []
 channel-webhook = []
 channel-whatsapp-cloud = []
 channel-voice-call = []
+channel-wechat = []
 channel-acp-server = []
 channel-matrix = ["dep:matrix-sdk", "dep:mime_guess"]
 voice-wake = ["dep:cpal", "zeroclaw-config/voice-wake"]

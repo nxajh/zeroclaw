@@ -228,7 +228,7 @@ fn compute_excluded_mcp_tools(
 }
 
 static SENSITIVE_KV_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(token|api[_-]?key|password|secret|user[_-]?key|bearer|credential)["']?\s*[:=]\s*(?:"([^"]{8,})"|'([^']{8,})'|([a-zA-Z0-9_\-\.]{8,}))"#).unwrap()
+    Regex::new(r#"(?i)(\w*(?:token|api[_-]?key|password|secret|user[_-]?key|bearer|credential))\s*[:=]\s*(?:"([^"]{8,})"|'([^']{8,})'|([a-zA-Z0-9_\-\.+/=]{8,}))"#).unwrap()
 });
 
 /// Scrub credentials from tool output to prevent accidental exfiltration.
@@ -260,13 +260,17 @@ pub fn scrub_credentials(input: &str) -> String {
 
             if full_match.contains(':') {
                 if full_match.contains('"') {
-                    format!("\"{}\": \"{}*[REDACTED]\"", key, prefix)
+                    format!("{}: \"{}*[REDACTED]\"", key, prefix)
+                } else if full_match.contains('\'') {
+                    format!("{}: '{}*[REDACTED]'", key, prefix)
                 } else {
                     format!("{}: {}*[REDACTED]", key, prefix)
                 }
             } else if full_match.contains('=') {
                 if full_match.contains('"') {
                     format!("{}=\"{}*[REDACTED]\"", key, prefix)
+                } else if full_match.contains('\'') {
+                    format!("{}='{}*[REDACTED]'", key, prefix)
                 } else {
                     format!("{}={}*[REDACTED]", key, prefix)
                 }

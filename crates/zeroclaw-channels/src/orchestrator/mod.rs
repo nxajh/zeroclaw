@@ -3299,7 +3299,7 @@ async fn process_channel_message(
                 }
             }
 
-            let history_response = delivered_response.clone();
+            let history_response = outbound_response.clone();
             append_sender_turn(
                 ctx.as_ref(),
                 &history_key,

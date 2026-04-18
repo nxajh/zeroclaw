@@ -1101,7 +1101,7 @@ pub async fn run_tool_call_loop(
                         Some("provider stream failed; fallback to non-streaming chat"),
                         serde_json::json!({
                             "iteration": iteration + 1,
-                            "error": scrub_credentials(&stream_err.to_string()),
+                            "error": stream_err.to_string(),
                         }),
                     );
                     {
@@ -1243,7 +1243,7 @@ pub async fn run_tool_call_loop(
                         serde_json::json!({
                             "iteration": iteration + 1,
                             "response_excerpt": truncate_with_ellipsis(
-                                &scrub_credentials(&response_text),
+                                &response_text,
                                 600
                             ),
                         }),
@@ -1263,7 +1263,7 @@ pub async fn run_tool_call_loop(
                         "duration_ms": llm_started_at.elapsed().as_millis(),
                         "input_tokens": resp_input_tokens,
                         "output_tokens": resp_output_tokens,
-                        "raw_response": scrub_credentials(&response_text),
+                        "raw_response": response_text,
                         "native_tool_calls": resp.tool_calls.len(),
                         "parsed_tool_calls": calls.len(),
                     }),
@@ -1483,7 +1483,7 @@ pub async fn run_tool_call_loop(
                             serde_json::json!({
                                 "iteration": iteration + 1,
                                 "tool": call.name,
-                                "arguments": scrub_credentials(&tool_args.to_string()),
+                                "arguments": tool_args.to_string(),
                             }),
                         );
                         if let Some(ref tx) = on_delta {
@@ -1491,7 +1491,7 @@ pub async fn run_tool_call_loop(
                                 .send(StreamDelta::Status(format!(
                                     "\u{274c} {}: {}\n",
                                     call.name,
-                                    truncate_with_ellipsis(&scrub_credentials(&cancelled), 200)
+                                    truncate_with_ellipsis(&cancelled, 200)
                                 )))
                                 .await;
                         }
@@ -1501,7 +1501,7 @@ pub async fn run_tool_call_loop(
                             ToolExecutionOutcome {
                                 output: cancelled,
                                 success: false,
-                                error_reason: Some(scrub_credentials(&reason)),
+                                error_reason: Some(reason),
                                 duration: Duration::ZERO,
                             },
                         ));
@@ -1584,7 +1584,7 @@ pub async fn run_tool_call_loop(
                         serde_json::json!({
                             "iteration": iteration + 1,
                             "tool": tool_name.clone(),
-                            "arguments": scrub_credentials(&tool_args.to_string()),
+                            "arguments": tool_args.to_string(),
                         }),
                     );
                     if let Some(ref tx) = on_delta {
@@ -1631,7 +1631,7 @@ pub async fn run_tool_call_loop(
                     serde_json::json!({
                         "iteration": iteration + 1,
                         "tool": tool_name.clone(),
-                        "arguments": scrub_credentials(&tool_args.to_string()),
+                        "arguments": tool_args.to_string(),
                         "deduplicated": true,
                     }),
                 );
@@ -1667,7 +1667,7 @@ pub async fn run_tool_call_loop(
                 serde_json::json!({
                     "iteration": iteration + 1,
                     "tool": tool_name.clone(),
-                    "arguments": scrub_credentials(&tool_args.to_string()),
+                    "arguments": tool_args.to_string(),
                 }),
             );
 
@@ -1743,7 +1743,7 @@ pub async fn run_tool_call_loop(
                     "iteration": iteration + 1,
                     "tool": call.name.clone(),
                     "duration_ms": outcome.duration.as_millis(),
-                    "output": scrub_credentials(&outcome.output),
+                    "output": outcome.output,
                 }),
             );
 

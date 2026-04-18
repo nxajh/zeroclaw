@@ -4125,7 +4125,7 @@ fn build_channel_by_id(config: &Config, channel_id: &str) -> Result<Arc<dyn Chan
             #[cfg(feature = "channel-wechat")]
             {
                 let wc = config
-                    .channels_config
+                    .channels
                     .wechat
                     .as_ref()
                     .context("WeChat channel is not configured")?;
@@ -4878,7 +4878,7 @@ fn collect_configured_channels(
     }
 
     #[cfg(feature = "channel-wechat")]
-    if let Some(ref wc) = config.channels_config.wechat {
+    if let Some(ref wc) = config.channels.wechat {
         if wc.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "WeChat",
@@ -4889,7 +4889,7 @@ fn collect_configured_channels(
         }
     }
 
-    if let Some(ref ct) = config.channels_config.clawdtalk {
+    if let Some(ref ct) = config.channels.clawdtalk {
         if ct.enabled {
             channels.push(ConfiguredChannel {
                 display_name: "ClawdTalk",

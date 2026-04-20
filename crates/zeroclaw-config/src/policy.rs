@@ -2642,7 +2642,7 @@ mod tests {
     }
 
     #[test]
-    fn git_dash_C_uppercase_is_allowed() {
+    fn git_dash_c_uppercase_is_allowed() {
         // Regression test for #5809: git -C (change directory) must not be
         // conflated with git -c (set config override) after arg lowercasing.
         let p = default_policy();

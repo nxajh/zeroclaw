@@ -93,7 +93,6 @@ impl Tool for CodexCliTool {
         // specially-crafted path components).
         let work_dir = if let Some(wd) = args.get("working_directory").and_then(|v| v.as_str()) {
             let wd_path = std::path::PathBuf::from(wd);
-            let workspace = &self.security.workspace_dir;
             let canonical_wd = match wd_path.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
@@ -107,28 +106,11 @@ impl Tool for CodexCliTool {
                     });
                 }
             };
-            let canonical_ws = match workspace.canonicalize() {
-                Ok(p) => p,
-                Err(_) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "workspace directory '{}' does not exist or is not accessible",
-                            workspace.display()
-                        )),
-                    });
-                }
-            };
-            if !canonical_wd.starts_with(&canonical_ws) {
+            if !self.security.is_resolved_path_allowed(&canonical_wd) {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!(
-                        "working_directory '{}' is outside the workspace '{}'",
-                        wd,
-                        workspace.display()
-                    )),
+                    error: Some(self.security.resolved_path_violation_message(&canonical_wd)),
                 });
             }
             canonical_wd

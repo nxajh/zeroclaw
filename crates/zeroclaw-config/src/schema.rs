@@ -11775,6 +11775,7 @@ auto_save = true
                 dingtalk: None,
                 wecom: None,
                 qq: None,
+                wechat: None,
                 twitter: None,
                 mochat: None,
                 #[cfg(feature = "channel-nostr")]
@@ -12910,6 +12911,7 @@ allowed_rooms = ["!ops:matrix.org"]
             dingtalk: None,
             wecom: None,
             qq: None,
+            wechat: None,
             twitter: None,
             mochat: None,
             #[cfg(feature = "channel-nostr")]
@@ -13284,6 +13286,7 @@ bot_token = "xoxb-tok"
             dingtalk: None,
             wecom: None,
             qq: None,
+            wechat: None,
             twitter: None,
             mochat: None,
             #[cfg(feature = "channel-nostr")]

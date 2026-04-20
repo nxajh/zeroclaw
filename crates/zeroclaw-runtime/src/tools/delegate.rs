@@ -1176,12 +1176,14 @@ impl DelegateTool {
                 0,    // context_token_budget: 0 = disabled for subagents
                 None, // shared_budget: TODO thread from parent in future
                 None, // channel: delegate subagents don't support approval
+                true, // show_reasoning_content: default for delegate subagents
             ),
         )
         .await;
 
         match result {
-            Ok(Ok(response)) => {
+            Ok(Ok(texts)) => {
+                let response = texts.join("");
                 let rendered = if response.trim().is_empty() {
                     "[Empty response]".to_string()
                 } else {

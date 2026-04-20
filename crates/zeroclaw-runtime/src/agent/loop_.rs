@@ -650,7 +650,7 @@ pub async fn agent_turn(
     model_switch_callback: Option<ModelSwitchCallback>,
     channel: Option<&dyn Channel>,
 ) -> Result<String> {
-    run_tool_call_loop(
+    let texts = run_tool_call_loop(
         provider,
         history,
         tools_registry,
@@ -676,8 +676,12 @@ pub async fn agent_turn(
         0,    // context_token_budget: 0 = disabled (legacy callers)
         None, // shared_budget: no shared budget for legacy callers
         channel,
+        true, // show_reasoning_content: default for legacy callers
     )
     .await
+    .map(|texts| texts.join(""))?;
+
+    Ok(texts)
 }
 
 fn maybe_inject_channel_delivery_defaults(
@@ -815,7 +819,8 @@ pub async fn run_tool_call_loop(
     context_token_budget: usize,
     shared_budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
     channel: Option<&dyn Channel>,
-) -> Result<String> {
+    show_reasoning_content: bool,
+) -> Result<Vec<String>> {
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
     } else {
@@ -840,8 +845,9 @@ pub async fn run_tool_call_loop(
         },
     );
 
-    // Accumulated display text across all tool-loop calls.
-    let mut accumulated_display_text = String::new();
+    // Per-round display texts across all tool-loop iterations.
+    // Each element is the assistant text produced in a single iteration.
+    let mut display_texts: Vec<String> = Vec::new();
 
     for iteration in 0..max_iterations {
         let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
@@ -1181,6 +1187,7 @@ pub async fn run_tool_call_loop(
             native_tool_calls,
             _parse_issue_detected,
             response_streamed_live,
+            reasoning_content,
         ) = match chat_result {
             Ok(resp) => {
                 let (resp_input_tokens, resp_output_tokens) = resp
@@ -1300,6 +1307,7 @@ pub async fn run_tool_call_loop(
                     native_calls,
                     parse_issue.is_some(),
                     streamed_live_deltas,
+                    reasoning_content,
                 )
             }
             Err(e) => {
@@ -1364,6 +1372,16 @@ pub async fn run_tool_call_loop(
         } else {
             parsed_text
         };
+        // Suppress reasoning/thinking content from user-facing output when
+        // configured.  When `content` is empty the provider falls back to
+        // `reasoning_content` for `text`, so we detect that case by comparing.
+        let display_text = if !show_reasoning_content
+            && reasoning_content.as_deref() == Some(display_text.as_str())
+        {
+            String::new()
+        } else {
+            display_text
+        };
         // ── Progress: LLM responded ─────────────────────────────
         if let Some(ref tx) = on_delta {
             let llm_secs = llm_started_at.elapsed().as_secs();
@@ -1392,7 +1410,9 @@ pub async fn run_tool_call_loop(
                 }),
             );
             // No tool calls — this is the final response.
-            accumulated_display_text.push_str(&display_text);
+            if !display_text.is_empty() {
+                display_texts.push(display_text.clone());
+            }
 
             // If text wasn't streamed live, send it now via post-hoc chunking.
             // When streamed live, the channel already received the deltas.
@@ -1423,11 +1443,13 @@ pub async fn run_tool_call_loop(
             }
 
             history.push(ChatMessage::assistant(response_text.clone()));
-            return Ok(accumulated_display_text);
+            return Ok(display_texts);
         }
 
         // Accumulate text from this iteration (tool calls present, loop continues).
-        accumulated_display_text.push_str(&display_text);
+        if !display_text.is_empty() {
+            display_texts.push(display_text.clone());
+        }
 
         // Native tool-call providers can return assistant text separately from
         // the structured call payload; relay it to draft-capable channels.
@@ -1958,8 +1980,10 @@ pub async fn run_tool_call_loop(
             if text.is_empty() {
                 anyhow::bail!("Agent exceeded maximum tool iterations ({max_iterations})")
             }
-            accumulated_display_text.push_str(&text);
-            Ok(accumulated_display_text)
+            if !text.is_empty() {
+                display_texts.push(text);
+            }
+            Ok(display_texts)
         }
         Err(e) => {
             tracing::warn!(error = %e, "Final summary LLM call failed, bailing");
@@ -2546,12 +2570,13 @@ pub async fn run(
                         config.agent.max_context_tokens,
                         None, // shared_budget
                         None, // channel: CLI mode — uses prompt_cli
+                        config.agent.show_reasoning_content,
                     ),
                 )
                 .await
             {
                 Ok(resp) => {
-                    response = resp;
+                    response = resp.join("");
                     break;
                 }
                 Err(e) => {
@@ -2856,11 +2881,12 @@ pub async fn run(
                             config.agent.max_context_tokens,
                             None, // shared_budget
                             None, // channel: interactive CLI — uses prompt_cli
+                            config.agent.show_reasoning_content,
                         ),
                     )
                     .await
                 {
-                    Ok(resp) => break resp,
+                    Ok(resp) => break resp.join(""),
                     Err(e) => {
                         if is_tool_loop_cancelled(&e) {
                             eprintln!("\n\x1b[2m(cancelled)\x1b[0m");
@@ -4466,6 +4492,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -4522,6 +4549,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect_err("oversized payload must fail");
@@ -4572,6 +4600,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -4621,6 +4650,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect_err("should fail without vision_provider config");
@@ -4677,6 +4707,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect_err("should fail when vision provider cannot be created");
@@ -4733,6 +4764,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("text-only messages should succeed with default provider");
@@ -4790,6 +4822,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect_err("should fail due to nonexistent vision provider");
@@ -4845,6 +4878,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("empty image markers should not trigger vision routing");
@@ -4900,6 +4934,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect_err("should attempt vision provider creation for multiple images");
@@ -5038,6 +5073,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("parallel execution should complete");
@@ -5116,6 +5152,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("cron_add delivery defaults should be injected");
@@ -5186,6 +5223,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("explicit delivery mode should be preserved");
@@ -5251,6 +5289,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -5329,6 +5368,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("non-interactive shell should succeed for low-risk command");
@@ -5397,6 +5437,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("loop should finish with exempt tool executing twice");
@@ -5485,6 +5526,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("loop should complete");
@@ -5547,6 +5589,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("native fallback id flow should complete");
@@ -5636,6 +5679,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("native tool-call text should be relayed through on_delta");
@@ -5702,6 +5746,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("streaming provider should complete");
@@ -5771,6 +5816,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("streaming tool loop should execute tool and finish");
@@ -5847,6 +5893,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("native streaming events should preserve tool loop semantics");
@@ -5932,6 +5979,7 @@ mod tests {
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("routed streaming provider should complete");
@@ -6994,6 +7042,7 @@ Let me check the result."#;
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("tool loop should complete");
@@ -7154,6 +7203,7 @@ Let me check the result."#;
                     0,
                     None,
                     None, // channel
+            true, // show_reasoning_content
                 ),
             )
             .await
@@ -7240,6 +7290,7 @@ Let me check the result."#;
                     0,
                     None,
                     None, // channel
+            true, // show_reasoning_content
                 ),
             )
             .await
@@ -7299,6 +7350,7 @@ Let me check the result."#;
             0,
             None,
             None, // channel
+            true, // show_reasoning_content
         )
         .await
         .expect("should succeed without cost scope");

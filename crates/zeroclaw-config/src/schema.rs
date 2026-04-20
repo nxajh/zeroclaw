@@ -1489,6 +1489,14 @@ pub struct AgentConfig {
     /// behavior). Default: `2`.
     #[serde(default = "default_keep_tool_context_turns")]
     pub keep_tool_context_turns: usize,
+
+    /// When `true` (default), reasoning/thinking content from models that
+    /// return `reasoning_content` (e.g. DeepSeek-R1, GLM) is shown to the
+    /// user when the model provides no regular `content`. Set to `false` to
+    /// suppress reasoning content from user-facing output; it will still be
+    /// preserved in conversation history for API compatibility.
+    #[serde(default = "default_show_reasoning_content")]
+    pub show_reasoning_content: bool,
 }
 
 fn default_max_tool_result_chars() -> usize {
@@ -1497,6 +1505,10 @@ fn default_max_tool_result_chars() -> usize {
 
 fn default_keep_tool_context_turns() -> usize {
     2
+}
+
+fn default_show_reasoning_content() -> bool {
+    false
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -1539,6 +1551,7 @@ impl Default for AgentConfig {
             context_compression: crate::scattered_types::ContextCompressionConfig::default(),
             max_tool_result_chars: default_max_tool_result_chars(),
             keep_tool_context_turns: default_keep_tool_context_turns(),
+            show_reasoning_content: default_show_reasoning_content(),
         }
     }
 }

@@ -376,6 +376,7 @@ struct ChannelRuntimeContext {
     pacing: zeroclaw_config::schema::PacingConfig,
     max_tool_result_chars: usize,
     context_token_budget: usize,
+    show_reasoning_content: bool,
     debouncer: Arc<zeroclaw_infra::debounce::MessageDebouncer>,
 }
 
@@ -2990,7 +2991,7 @@ async fn process_channel_message(
     };
 
     enum LlmExecutionResult {
-        Completed(Result<Result<String, anyhow::Error>, tokio::time::error::Elapsed>),
+        Completed(Result<Result<Vec<String>, anyhow::Error>, tokio::time::error::Elapsed>),
         Cancelled,
     }
 
@@ -3058,6 +3059,7 @@ async fn process_channel_message(
                         ctx.context_token_budget,
                         None, // shared_budget
                         target_channel.as_deref(),
+                        ctx.show_reasoning_content,
                     ),
                     ),
                     ),
@@ -3177,9 +3179,10 @@ async fn process_channel_message(
                 tracing::debug!("Failed to cancel draft on {}: {err}", channel.name());
             }
         }
-        LlmExecutionResult::Completed(Ok(Ok(response))) => {
+        LlmExecutionResult::Completed(Ok(Ok(per_round_texts))) => {
+            let full_response = per_round_texts.join("");
             // ── Hook: on_message_sending (modifying) ─────────
-            let mut outbound_response = response;
+            let mut outbound_response = full_response;
             if let Some(hooks) = &ctx.hooks {
                 match hooks
                     .run_on_message_sending(
@@ -3341,6 +3344,8 @@ async fn process_channel_message(
             );
             if let Some(channel) = target_channel.as_ref() {
                 if let Some(ref draft_id) = draft_message_id {
+                    // Draft-capable channels (Telegram/Discord/Matrix):
+                    // finalize the draft with the full joined text.
                     if let Err(e) = channel
                         .finalize_draft(&msg.reply_target, draft_id, &delivered_response)
                         .await
@@ -3353,15 +3358,73 @@ async fn process_channel_message(
                             )
                             .await;
                     }
-                } else if let Err(e) = channel
-                    .send(
-                        &SendMessage::new(&delivered_response, &msg.reply_target)
-                            .in_thread(msg.thread_ts.clone())
-                            .with_cancellation(cancellation_token.clone()),
-                    )
-                    .await
-                {
-                    eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
+                } else {
+                    // Non-draft channels (WeChat, WhatsApp, etc.):
+                    // send each round's text as a separate message.
+                    if per_round_texts.len() <= 1 {
+                        // Single round or empty — send the full response as one message.
+                        if let Err(e) = channel
+                            .send(
+                                &SendMessage::new(&delivered_response, &msg.reply_target)
+                                    .in_thread(msg.thread_ts.clone())
+                                    .with_cancellation(cancellation_token.clone()),
+                            )
+                            .await
+                        {
+                            eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
+                        }
+                    } else {
+                        // Multiple rounds — send each round separately.
+                        for (i, round_text) in per_round_texts.iter().enumerate() {
+                            let sanitized = sanitize_channel_response(
+                                round_text,
+                                ctx.tools_registry.as_ref(),
+                            );
+                            if sanitized.trim().is_empty() {
+                                continue;
+                            }
+                            // Each round sends its own content.  The fallback footer
+                            // (when a different provider family served the request) is
+                            // appended to the last round only.
+                            let final_text = if i == per_round_texts.len() - 1 {
+                                if let Some(fb) = fallback_info.as_ref() {
+                                    let req_base = fb.requested_provider.split(':').next().unwrap_or("");
+                                    let act_base = fb.actual_provider.split(':').next().unwrap_or("");
+                                    let same_family = req_base == act_base
+                                        || req_base.starts_with(act_base)
+                                        || act_base.starts_with(req_base);
+                                    if !same_family {
+                                        format!(
+                                            "{}\n\n---\n⚡ `{}` unavailable — response from **{}** (`{}`)\nSwitch model: /models",
+                                            sanitized,
+                                            fb.requested_provider, fb.actual_provider, fb.actual_model,
+                                        )
+                                    } else {
+                                        sanitized
+                                    }
+                                } else {
+                                    sanitized
+                                }
+                            } else {
+                                sanitized
+                            };
+                            if let Err(e) = channel
+                                .send(
+                                    &SendMessage::new(&final_text, &msg.reply_target)
+                                        .in_thread(msg.thread_ts.clone())
+                                        .with_cancellation(cancellation_token.clone()),
+                                )
+                                .await
+                            {
+                                eprintln!(
+                                    "  ❌ Failed to reply on {} (round {}): {e}",
+                                    channel.name(),
+                                    i + 1
+                                );
+                                // Continue sending remaining rounds.
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5586,6 +5649,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         pacing: config.pacing.clone(),
         max_tool_result_chars: config.agent.max_tool_result_chars,
         context_token_budget: config.agent.max_context_tokens,
+        show_reasoning_content: config.agent.show_reasoning_content,
         debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
             Duration::from_millis(config.channels.debounce_ms),
         )),
@@ -6109,6 +6173,7 @@ mod tests {
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -6235,6 +6300,7 @@ mod tests {
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -6318,6 +6384,7 @@ mod tests {
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -6418,6 +6485,7 @@ mod tests {
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7019,6 +7087,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7111,6 +7180,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7217,6 +7287,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7308,6 +7379,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7409,6 +7481,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7531,6 +7604,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7634,6 +7708,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7752,6 +7827,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7858,6 +7934,7 @@ BTC is currently around $65,000 based on latest tool output."#
             },
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -7954,6 +8031,7 @@ BTC is currently around $65,000 based on latest tool output."#
             },
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -8173,6 +8251,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -8287,6 +8366,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -8420,6 +8500,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -8550,6 +8631,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -8658,6 +8740,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -8747,6 +8830,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -8836,6 +8920,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -9631,6 +9716,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -9777,6 +9863,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -9964,6 +10051,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -10082,6 +10170,7 @@ BTC is currently around $65,000 based on latest tool output."#
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -10706,6 +10795,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -10804,6 +10894,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -10934,6 +11025,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 50000,
             context_token_budget: 128_000,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 std::time::Duration::ZERO,
             )),
@@ -11112,6 +11204,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -11234,6 +11327,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -11348,6 +11442,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -11482,6 +11577,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),
@@ -11798,6 +11894,7 @@ This is an example JSON object for profile settings."#;
             pacing: zeroclaw_config::schema::PacingConfig::default(),
             max_tool_result_chars: 0,
             context_token_budget: 0,
+            show_reasoning_content: true,
             debouncer: Arc::new(zeroclaw_infra::debounce::MessageDebouncer::new(
                 Duration::ZERO,
             )),

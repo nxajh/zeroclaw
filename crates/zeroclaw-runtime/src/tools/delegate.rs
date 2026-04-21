@@ -66,17 +66,16 @@ pub struct DelegateTool {
     /// Inherited multimodal handling config for sub-agent loops.
     multimodal_config: zeroclaw_config::schema::MultimodalConfig,
     /// Global delegate tool config providing default timeout values.
+    pub fn new(
         agents: HashMap<String, DelegateAgentConfig>,
-        config: Arc<zeroclaw_config::schema::Config>,
         fallback_credential: Option<String>,
         security: Arc<SecurityPolicy>,
-        provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions,
     ) -> Self {
         Self {
             agents: Arc::new(agents),
             security,
             fallback_credential,
-            provider_runtime_options,
+            provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions::default(),
             depth: 0,
             parent_tools: Arc::new(RwLock::new(Vec::new())),
             multimodal_config: zeroclaw_config::schema::MultimodalConfig::default(),
@@ -84,7 +83,7 @@ pub struct DelegateTool {
             workspace_dir: PathBuf::new(),
             cancellation_token: CancellationToken::new(),
             memory: None,
-            config,
+            config: Arc::new(zeroclaw_config::schema::Config::default()),
         }
     }
 

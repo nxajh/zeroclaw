@@ -587,17 +587,17 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
         ));
     }
 
-    // Delegate agents: provider validity
+    // Delegate agents: check if model route key resolves
     let mut agent_names: Vec<_> = config.agents.keys().collect();
     agent_names.sort();
     for name in agent_names {
         let agent = config.agents.get(name).unwrap();
-        if let Some(reason) = provider_validation_error(&agent.provider) {
+        if config.resolve_model(&agent.model).is_none() {
             items.push(DiagItem::warn(
                 cat,
                 format!(
-                    "agent \"{name}\" uses invalid provider \"{}\": {}",
-                    agent.provider, reason
+                    "agent \"{name}\" uses unresolvable model route key \"{}\"",
+                    agent.model
                 ),
             ));
         }

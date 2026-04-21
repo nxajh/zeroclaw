@@ -66,6 +66,18 @@ pub struct DelegateTool {
     /// Inherited multimodal handling config for sub-agent loops.
     multimodal_config: zeroclaw_config::schema::MultimodalConfig,
     /// Global delegate tool config providing default timeout values.
+    delegate_config: DelegateToolConfig,
+    /// Workspace directory for background result storage.
+    workspace_dir: PathBuf,
+    /// Cancellation token for cascade control of background tasks.
+    cancellation_token: CancellationToken,
+    /// Memory backend for namespace isolation on delegate agents.
+    memory: Option<Arc<dyn Memory>>,
+    /// Root config for model resolution.
+    config: Arc<zeroclaw_config::schema::Config>,
+}
+
+impl DelegateTool {
     pub fn new(
         agents: HashMap<String, DelegateAgentConfig>,
         fallback_credential: Option<String>,
@@ -513,8 +525,8 @@ impl DelegateTool {
                     success: true,
                     output: format!(
                         "[Agent '{agent_name}' ({provider}/{model})]\n{rendered}",
-                        provider = provider_name,
-                        model = model_name
+                        provider = resolved.provider.name,
+                        model = resolved.model.model_id
                     ),
                     error: None,
                 })
@@ -643,6 +655,7 @@ impl DelegateTool {
                 workspace_dir: workspace_dir.clone(),
                 cancellation_token: child_token.clone(),
                 memory: None,
+                config,
             };
 
             let args_inner = json!({

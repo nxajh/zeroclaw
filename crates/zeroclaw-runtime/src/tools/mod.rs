@@ -840,10 +840,11 @@ pub fn all_tools_with_runtime(
             .map(|(name, cfg)| (name.clone(), cfg.clone()))
             .collect();
         let parent_tools = Arc::new(RwLock::new(tool_arcs.clone()));
-        let delegate_tool = DelegateTool::new_with_options(
+        let delegate_tool = DelegateTool::with_depth_and_options(
             delegate_agents,
             delegate_fallback_credential.clone(),
             security.clone(),
+            0,
             provider_runtime_options.clone(),
             Arc::new(root_config.clone()),
         )

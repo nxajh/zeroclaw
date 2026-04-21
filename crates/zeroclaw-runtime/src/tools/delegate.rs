@@ -662,7 +662,6 @@ impl DelegateTool {
                 "agent": agent_name_owned,
                 "prompt": full_prompt,
             });
-                config: config.clone(),
 
             // Race the delegation against cancellation
             let outcome = tokio::select! {

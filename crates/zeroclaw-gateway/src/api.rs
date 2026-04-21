@@ -932,9 +932,6 @@ fn mask_sensitive_fields(
         mask_required_secret(&mut ngrok.auth_token);
     }
 
-    for agent in masked.agents.values_mut() {
-        mask_optional_secret(&mut agent.api_key);
-    }
 
     // Mask providers
     for provider in &mut masked.providers {
@@ -1057,11 +1054,7 @@ fn restore_masked_sensitive_fields(
         restore_required_secret(&mut incoming_tunnel.auth_token, &current_tunnel.auth_token);
     }
 
-    for (name, agent) in &mut incoming.agents {
-        if let Some(current_agent) = current.agents.get(name) {
-            restore_optional_secret(&mut agent.api_key, &current_agent.api_key);
-        }
-    }
+
     restore_embedding_route_api_keys(
         &mut incoming.embedding_routes,
         &current.embedding_routes,

@@ -229,9 +229,9 @@ async fn check_memory_roundtrip(config: &crate::config::Config) -> CheckResult {
         &config.memory,
         &config.workspace_dir,
         config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref()),
+            .effective_model(None)
+            .and_then(|r| r.provider.api_key.clone())
+            .as_deref(),
     ) {
         Ok(m) => m,
         Err(e) => return CheckResult::fail("memory", format!("cannot create backend: {e}")),

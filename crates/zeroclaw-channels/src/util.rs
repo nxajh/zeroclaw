@@ -172,12 +172,15 @@ pub fn parse_attachment_markers(message: &str) -> (String, Vec<(String, String)>
 
 /// Generate a conversation history key from a channel message.
 pub fn conversation_history_key(msg: &zeroclaw_api::channel::ChannelMessage) -> String {
+    // For 1:1 chats (reply_target == sender), omit the duplicate to keep keys short.
+    let base = if msg.reply_target == msg.sender {
+        format!("{}_{}", msg.channel, msg.sender)
+    } else {
+        format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender)
+    };
     match &msg.thread_ts {
-        Some(tid) => format!(
-            "{}_{}_{}_{}",
-            msg.channel, msg.reply_target, tid, msg.sender
-        ),
-        None => format!("{}_{}_{}", msg.channel, msg.reply_target, msg.sender),
+        Some(tid) => format!("{}_{}", base, tid),
+        None => base,
     }
 }
 

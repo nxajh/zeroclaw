@@ -1,26 +1,22 @@
-//! Forward-only config schema migration.
+//! Config schema migration.
 //!
-//! Old config layouts are typed structs. Migration deserializes into the legacy
-//! struct, moves field values into the new layout, and returns a clean [`Config`].
+//! Handles TOML-level transformations (field renames, restructures) that
+//! `#[serde]` attributes cannot capture. The on-disk file is never rewritten
+//! by migration — it runs in-memory only.
 //!
-//! The on-disk file is never rewritten by migration.
+//! ## Schema versioning
 //!
-//! ## When to bump the schema version
-//!
-//! Only when props are **renamed, moved, or removed**. New props with `#[serde(default)]`
-//! don't need a bump.
+//! Only bump the version when fields are **renamed, moved, or removed**.
+//! New fields with `#[serde(default)]` don't need a bump.
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
-use std::collections::HashMap;
 use toml_edit::DocumentMut;
 
-use super::schema::ModelProviderConfig;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
-
-/// Top-level keys from V1 that are consumed by V1Compat during migration.
-/// Used by the unknown-key detector to suppress false "unknown key" warnings.
+/// Top-level keys that may appear in older config files.
+/// Used by the unknown-key detector to suppress false "unknown key" warnings
+/// for fields that were valid in previous schema versions.
 pub const V1_LEGACY_KEYS: &[&str] = &[
     "api_key",
     "api_url",
@@ -39,145 +35,11 @@ pub const V1_LEGACY_KEYS: &[&str] = &[
     "channels_config",
 ];
 
-/// Wraps the current Config with extra fields from V1 that no longer exist on Config.
-/// `#[serde(flatten)]` lets Config consume its known fields; the old fields are
-/// captured here.
-#[derive(Deserialize)]
-pub struct V1Compat {
-    #[serde(flatten)]
-    pub config: super::schema::Config,
-
-    // ── Old top-level provider fields (removed in V2) ──
-    #[serde(default)]
-    api_key: Option<String>,
-    #[serde(default)]
-    api_url: Option<String>,
-    #[serde(default)]
-    api_path: Option<String>,
-    #[serde(default, alias = "model_provider")]
-    default_provider: Option<String>,
-    #[serde(default, alias = "model")]
-    default_model: Option<String>,
-    #[serde(default)]
-    model_providers: HashMap<String, ModelProviderConfig>,
-    #[serde(default)]
-    default_temperature: Option<f64>,
-    #[serde(default)]
-    provider_timeout_secs: Option<u64>,
-    #[serde(default)]
-    provider_max_tokens: Option<u32>,
-    #[serde(default)]
-    extra_headers: Option<HashMap<String, String>>,
-    #[serde(default)]
-    model_routes: Vec<super::schema::ModelRouteConfig>,
-    #[serde(default)]
-    embedding_routes: Vec<super::schema::EmbeddingRouteConfig>,
-}
-
-impl V1Compat {
-    /// Consume self, migrating old fields into the current Config layout.
-    pub fn into_config(mut self) -> super::schema::Config {
-        let from = self.config.schema_version;
-        let needs_migration = from < CURRENT_SCHEMA_VERSION || self.has_legacy_fields();
-
-        if !needs_migration {
-            return self.config;
-        }
-
-        self.migrate_providers();
-        self.config.schema_version = CURRENT_SCHEMA_VERSION;
-
-        tracing::info!(
-            from = from,
-            to = CURRENT_SCHEMA_VERSION,
-            "Config schema migrated in-memory from version {from} to {CURRENT_SCHEMA_VERSION}. \
-             Run `zeroclaw config migrate` to update the file on disk.",
-        );
-
-        self.config
-    }
-
-    fn has_legacy_fields(&self) -> bool {
-        self.api_key.is_some()
-            || self.api_url.is_some()
-            || self.api_path.is_some()
-            || self.default_provider.is_some()
-            || self.default_model.is_some()
-            || !self.model_providers.is_empty()
-            || self.default_temperature.is_some()
-            || self.provider_timeout_secs.is_some()
-            || self.provider_max_tokens.is_some()
-            || self.extra_headers.as_ref().is_some_and(|h| !h.is_empty())
-            || !self.model_routes.is_empty()
-            || !self.embedding_routes.is_empty()
-    }
-
-    fn migrate_providers(&mut self) {
-        let fallback = self
-            .default_provider
-            .take()
-            .unwrap_or_else(|| "default".into());
-
-        // First, move old model_providers entries into providers.models.
-        // These take precedence over top-level fields (more specific).
-        for (key, profile) in std::mem::take(&mut self.model_providers) {
-            self.config.providers.models.entry(key).or_insert(profile);
-        }
-
-        // Then fill gaps in the fallback entry from top-level fields.
-        let entry = self
-            .config
-            .providers
-            .models
-            .entry(fallback.clone())
-            .or_default();
-
-        if entry.api_key.is_none() {
-            entry.api_key = self.api_key.take();
-        }
-        if entry.base_url.is_none() {
-            entry.base_url = self.api_url.take();
-        }
-        if entry.api_path.is_none() {
-            entry.api_path = self.api_path.take();
-        }
-        if entry.model.is_none() {
-            entry.model = self.default_model.take();
-        }
-        if entry.temperature.is_none() {
-            entry.temperature = self.default_temperature.take();
-        }
-        if entry.timeout_secs.is_none() {
-            entry.timeout_secs = self.provider_timeout_secs.take();
-        }
-        if entry.max_tokens.is_none() {
-            entry.max_tokens = self.provider_max_tokens.take();
-        }
-        if entry.extra_headers.is_empty()
-            && let Some(headers) = self.extra_headers.take()
-        {
-            entry.extra_headers = headers;
-        }
-
-        if self.config.providers.fallback.is_none() {
-            self.config.providers.fallback = Some(fallback);
-        }
-
-        // Move routing rules into providers.
-        if self.config.providers.model_routes.is_empty() && !self.model_routes.is_empty() {
-            self.config.providers.model_routes = std::mem::take(&mut self.model_routes);
-        }
-        if self.config.providers.embedding_routes.is_empty() && !self.embedding_routes.is_empty() {
-            self.config.providers.embedding_routes = std::mem::take(&mut self.embedding_routes);
-        }
-    }
-}
-
 /// Pre-deserialization table migration for nested field changes that
-/// `#[serde(flatten)]` cannot capture (e.g. removing a field from a nested
+/// `#[serde]` cannot capture (e.g. removing a field from a nested
 /// struct and moving its value elsewhere).
 ///
-/// Called on the raw `toml::Table` before it is deserialized into `V1Compat`.
+/// Called on the raw `toml::Table` before it is deserialized into `Config`.
 pub fn prepare_table(table: &mut toml::Table) {
     // Migrate channels_config.matrix.room_id → channels_config.matrix.allowed_rooms
     for key in &["channels_config", "channels"] {
@@ -229,9 +91,9 @@ pub fn prepare_table(table: &mut toml::Table) {
 
 // ── File-level migration (comment-preserving) ───────────────────────────────
 //
-// Uses V1Compat (the single source of migration logic) to compute the migrated
-// Config, then syncs the original toml_edit document to match. The sync function
-// is generic — it doesn't know field names, it just diffs two table structures.
+// Computes the migrated Config, then syncs the original toml_edit document
+// to match. The sync function is generic — it doesn't know field names, it
+// just diffs two table structures.
 
 /// Migrate a raw TOML config file, preserving comments and formatting.
 /// Returns `None` if already at current version.
@@ -239,11 +101,21 @@ pub fn migrate_file(raw: &str) -> Result<Option<String>> {
     let mut table: toml::Table = toml::from_str(raw).context("Failed to parse config table")?;
     prepare_table(&mut table);
     let prepared = toml::to_string(&table).context("Failed to re-serialize prepared table")?;
-    let compat: V1Compat = toml::from_str(&prepared).context("Failed to deserialize config")?;
-    if compat.config.schema_version >= CURRENT_SCHEMA_VERSION && !compat.has_legacy_fields() {
+
+    let mut config: super::schema::Config =
+        toml::from_str(&prepared).context("Failed to deserialize config")?;
+
+    if config.schema_version >= CURRENT_SCHEMA_VERSION {
         return Ok(None);
     }
-    let config = compat.into_config();
+
+    config.schema_version = CURRENT_SCHEMA_VERSION;
+
+    tracing::info!(
+        to = CURRENT_SCHEMA_VERSION,
+        "Config schema migrated in-memory to version {CURRENT_SCHEMA_VERSION}. \
+         Run `zeroclaw config migrate` to update the file on disk.",
+    );
 
     // Serialize the migrated config to get the target table structure.
     let target: toml::Table = toml::from_str(&toml::to_string(&config)?)
@@ -339,8 +211,6 @@ fn toml_to_edit_value(v: &toml::Value) -> toml_edit::Value {
             .parse()
             .unwrap_or_else(|_| toml_edit::Value::from(dt.to_string())),
         toml::Value::Table(tbl) => {
-            // Tables inside arrays (e.g. `[[providers.model_routes]]`) need to be
-            // converted to inline tables so they can be pushed into a toml_edit Array.
             let mut inline = toml_edit::InlineTable::new();
             for (k, v) in tbl {
                 inline.insert(k, toml_to_edit_value(v));

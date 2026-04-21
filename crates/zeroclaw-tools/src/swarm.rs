@@ -20,6 +20,7 @@ pub struct SwarmTool {
     security: Arc<SecurityPolicy>,
     fallback_credential: Option<String>,
     provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions,
+    config: Arc<zeroclaw_config::schema::Config>,
 }
 
 impl SwarmTool {
@@ -29,6 +30,7 @@ impl SwarmTool {
         fallback_credential: Option<String>,
         security: Arc<SecurityPolicy>,
         provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions,
+        config: Arc<zeroclaw_config::schema::Config>,
     ) -> Self {
         Self {
             swarms: Arc::new(swarms),
@@ -36,6 +38,7 @@ impl SwarmTool {
             security,
             fallback_credential,
             provider_runtime_options,
+            config,
         }
     }
 
@@ -44,27 +47,25 @@ impl SwarmTool {
         agent_config: &DelegateAgentConfig,
         agent_name: &str,
     ) -> Result<Box<dyn Provider>, ToolResult> {
-        let credential = agent_config
-            .api_key
-            .clone()
-            .or_else(|| self.fallback_credential.clone());
+        let resolved = self.config.resolve_model(&agent_config.model).ok_or_else(|| ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(format!(
+                "Cannot resolve model route key '{}' for agent '{agent_name}'",
+                agent_config.model
+            )),
+        })?;
 
-        zeroclaw_providers::create_provider_with_options(
-            &agent_config.provider,
-            credential.as_deref(),
-            &self.provider_runtime_options,
-        )
-        .map_err(|e| ToolResult {
+        zeroclaw_providers::create_provider_from_config(&resolved.provider).map_err(|e| ToolResult {
             success: false,
             output: String::new(),
             error: Some(format!(
                 "Failed to create provider '{}' for agent '{agent_name}': {e}",
-                agent_config.provider
+                resolved.provider.name
             )),
         })
     }
 
-    async fn call_agent(
         &self,
         agent_name: &str,
         agent_config: &DelegateAgentConfig,
@@ -82,7 +83,7 @@ impl SwarmTool {
             provider.chat_with_system(
                 agent_config.system_prompt.as_deref(),
                 prompt,
-                &agent_config.model,
+                model_id,
                 temperature,
             ),
         )
@@ -142,8 +143,8 @@ impl SwarmTool {
             {
                 Ok(output) => {
                     results.push(format!(
-                        "[{agent_name} ({}/{})] {output}",
-                        agent_config.provider, agent_config.model
+                        "[{agent_name} ({})] {output}",
+                        agent_config.model
                     ));
                     current_input = output;
                 }
@@ -194,15 +195,22 @@ impl SwarmTool {
                 }
             };
 
-            let credential = agent_config
-                .api_key
-                .clone()
-                .or_else(|| self.fallback_credential.clone());
+            let resolved_rr = match self.config.resolve_model(&agent_config.model) {
+                Some(r) => r,
+                None => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Cannot resolve model route key '{}' for agent '{agent_name}'",
+                            agent_config.model
+                        )),
+                    });
+                }
+            };
 
-            let provider = match zeroclaw_providers::create_provider_with_options(
-                &agent_config.provider,
-                credential.as_deref(),
-                &self.provider_runtime_options,
+            let provider = match zeroclaw_providers::create_provider_from_config(
+                &resolved_rr.provider,
             ) {
                 Ok(p) => p,
                 Err(e) => {
@@ -210,7 +218,8 @@ impl SwarmTool {
                         success: false,
                         output: String::new(),
                         error: Some(format!(
-                            "Failed to create provider for agent '{agent_name}': {e}"
+                            "Failed to create provider '{}' for agent '{agent_name}': {e}",
+                            resolved_rr.provider.name
                         )),
                     });
                 }
@@ -219,10 +228,9 @@ impl SwarmTool {
             let name = agent_name.clone();
             let prompt_clone = full_prompt.clone();
             let timeout = swarm_config.timeout_secs;
-            let model = agent_config.model.clone();
+            let model = resolved_rr.model.model_id.clone();
             let temperature = agent_config.temperature.unwrap_or(0.7);
             let system_prompt = agent_config.system_prompt.clone();
-            let provider_name = agent_config.provider.clone();
 
             join_set.spawn(async move {
                 let result = tokio::time::timeout(
@@ -300,8 +308,8 @@ impl SwarmTool {
                         .as_deref()
                         .unwrap_or("General purpose agent");
                     format!(
-                        "- {name}: {desc} (provider: {}, model: {})",
-                        cfg.provider, cfg.model
+                        "- {name}: {desc} (model: {})",
+                        cfg.model
                     )
                 })
             })
@@ -342,7 +350,7 @@ impl SwarmTool {
             router_provider.chat_with_system(
                 Some("You are a routing assistant. Respond with only the agent name."),
                 &routing_prompt,
-                &first_agent_config.model,
+                &self.config.resolve_model(&first_agent_config.model).map(|r| r.model.model_id.as_str()).unwrap_or(&first_agent_config.model),
                 0.0,
             ),
         )
@@ -404,7 +412,7 @@ impl SwarmTool {
                 success: true,
                 output: format!(
                     "[Swarm router — selected '{matched_name}' ({}/{})]\n{output}",
-                    agent_config.provider, agent_config.model
+                    agent_config.model, agent_config.model
                 ),
                 error: None,
             }),
@@ -558,10 +566,8 @@ mod tests {
         agents.insert(
             "researcher".to_string(),
             DelegateAgentConfig {
-                provider: "ollama".to_string(),
                 model: "llama3".to_string(),
                 system_prompt: Some("You are a research assistant.".to_string()),
-                api_key: None,
                 temperature: Some(0.3),
                 max_depth: 3,
                 agentic: false,
@@ -576,10 +582,8 @@ mod tests {
         agents.insert(
             "writer".to_string(),
             DelegateAgentConfig {
-                provider: "openrouter".to_string(),
                 model: "anthropic/claude-sonnet-4-20250514".to_string(),
                 system_prompt: Some("You are a technical writer.".to_string()),
-                api_key: Some("test-key".to_string()),
                 temperature: Some(0.5),
                 max_depth: 3,
                 agentic: false,

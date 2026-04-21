@@ -163,23 +163,24 @@ pub async fn run_wizard(force: bool, callbacks: WizardCallbacks) -> Result<Confi
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
         schema_version: zeroclaw_config::migration::CURRENT_SCHEMA_VERSION,
-        providers: {
-            let entry = zeroclaw_config::schema::ModelProviderConfig {
-                api_key: if api_key.is_empty() {
-                    None
-                } else {
-                    Some(api_key)
-                },
-                base_url: provider_api_url,
-                model: Some(model),
-                temperature: Some(0.7),
-                timeout_secs: Some(120),
+        providers: vec![zeroclaw_config::schema::ProviderConfig {
+            name: provider.clone(),
+            api: "openai".to_string(),
+            api_key: if api_key.is_empty() {
+                None
+            } else {
+                Some(api_key)
+            },
+            base_url: provider_api_url,
+            model: vec![zeroclaw_config::schema::ModelConfig {
+                model_id: model.clone(),
                 ..Default::default()
-            };
-            let mut p = zeroclaw_config::providers::ProvidersConfig::default();
-            p.models.insert(provider.clone(), entry);
-            p.fallback = Some(provider);
-            p
+            }],
+        }],
+        model_routes: std::collections::HashMap::new(),
+        agent: zeroclaw_config::schema::AgentConfig {
+            default_model: Some(format!("{provider}/{model}")),
+            ..Default::default()
         },
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
@@ -193,7 +194,6 @@ pub async fn run_wizard(force: bool, callbacks: WizardCallbacks) -> Result<Confi
         runtime: RuntimeConfig::default(),
         reliability: zeroclaw_config::schema::ReliabilityConfig::default(),
         scheduler: zeroclaw_config::schema::SchedulerConfig::default(),
-        agent: zeroclaw_config::schema::AgentConfig::default(),
         pacing: zeroclaw_config::schema::PacingConfig::default(),
         skills: zeroclaw_config::schema::SkillsConfig::default(),
         pipeline: zeroclaw_config::schema::PipelineConfig::default(),
@@ -249,6 +249,7 @@ pub async fn run_wizard(force: bool, callbacks: WizardCallbacks) -> Result<Confi
         opencode_cli: zeroclaw_config::schema::OpenCodeCliConfig::default(),
         sop: zeroclaw_config::schema::SopConfig::default(),
         shell_tool: zeroclaw_config::schema::ShellToolConfig::default(),
+        embedding_routes: Default::default(),
     };
 
     println!(
@@ -274,9 +275,8 @@ pub async fn run_wizard(force: bool, callbacks: WizardCallbacks) -> Result<Confi
 
     if has_channels
         && config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref())
+            .effective_model(None)
+            .and_then(|r| r.provider.api_key.clone())
             .is_some()
     {
         let launch: bool = Confirm::new()
@@ -333,9 +333,8 @@ pub async fn run_channels_repair_wizard(callbacks: WizardCallbacks) -> Result<Co
 
     if has_channels
         && config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref())
+            .effective_model(None)
+            .and_then(|r| r.provider.api_key.clone())
             .is_some()
     {
         let launch: bool = Confirm::new()
@@ -403,9 +402,8 @@ async fn run_provider_update_wizard(workspace_dir: &Path, config_path: &Path) ->
     let has_channels = has_launchable_channels(&config.channels);
     if has_channels
         && config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref())
+            .effective_model(None)
+            .and_then(|r| r.provider.api_key.clone())
             .is_some()
     {
         let launch: bool = Confirm::new()
@@ -439,15 +437,28 @@ fn apply_provider_update(
     model: String,
     provider_api_url: Option<String>,
 ) {
-    let entry = config.providers.models.entry(provider.clone()).or_default();
-    entry.model = Some(model);
-    entry.base_url = provider_api_url;
-    entry.api_key = if api_key.trim().is_empty() {
-        None
-    } else {
-        Some(api_key)
+    // Preserve existing api protocol if provider already exists
+    let api = config
+        .find_provider_v3(&provider)
+        .map(|p| p.api.clone())
+        .unwrap_or_else(|| "openai".to_string());
+
+    let provider_config = zeroclaw_config::schema::ProviderConfig {
+        name: provider.clone(),
+        api,
+        api_key: if api_key.trim().is_empty() {
+            None
+        } else {
+            Some(api_key)
+        },
+        base_url: provider_api_url,
+        model: vec![zeroclaw_config::schema::ModelConfig {
+            model_id: model.clone(),
+            ..Default::default()
+        }],
     };
-    config.providers.fallback = Some(provider);
+    config.upsert_provider_v3(provider_config);
+    config.set_default_model(&format!("{}/{}", provider, model));
 }
 
 // ── Quick setup (zero prompts) ───────────────────────────────────
@@ -643,23 +654,17 @@ async fn run_quick_setup_with_home(
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
         schema_version: zeroclaw_config::migration::CURRENT_SCHEMA_VERSION,
-        providers: {
-            let entry = zeroclaw_config::schema::ModelProviderConfig {
-                api_key: credential_override.map(|c| {
-                    let mut s = String::with_capacity(c.len());
-                    s.push_str(c);
-                    s
-                }),
-                model: Some(model.clone()),
-                temperature: Some(0.7),
-                timeout_secs: Some(120),
+        providers: vec![zeroclaw_config::schema::ProviderConfig {
+            name: provider_name.clone(),
+            api: "openai".to_string(),
+            api_key: credential_override.map(|c| c.to_string()),
+            base_url: None,
+            model: vec![zeroclaw_config::schema::ModelConfig {
+                model_id: model.clone(),
                 ..Default::default()
-            };
-            let mut p = zeroclaw_config::providers::ProvidersConfig::default();
-            p.models.insert(provider_name.clone(), entry);
-            p.fallback = Some(provider_name.clone());
-            p
-        },
+            }],
+        }],
+        model_routes: std::collections::HashMap::new(),
         observability: ObservabilityConfig::default(),
         autonomy: AutonomyConfig::default(),
         trust: crate::trust::TrustConfig::default(),
@@ -672,7 +677,10 @@ async fn run_quick_setup_with_home(
         runtime: RuntimeConfig::default(),
         reliability: zeroclaw_config::schema::ReliabilityConfig::default(),
         scheduler: zeroclaw_config::schema::SchedulerConfig::default(),
-        agent: zeroclaw_config::schema::AgentConfig::default(),
+        agent: zeroclaw_config::schema::AgentConfig {
+            default_model: Some(format!("{provider_name}/{model}")),
+            ..zeroclaw_config::schema::AgentConfig::default()
+        },
         pacing: zeroclaw_config::schema::PacingConfig::default(),
         skills: zeroclaw_config::schema::SkillsConfig::default(),
         pipeline: zeroclaw_config::schema::PipelineConfig::default(),
@@ -728,6 +736,7 @@ async fn run_quick_setup_with_home(
         opencode_cli: zeroclaw_config::schema::OpenCodeCliConfig::default(),
         sop: zeroclaw_config::schema::SopConfig::default(),
         shell_tool: zeroclaw_config::schema::ShellToolConfig::default(),
+        embedding_routes: Default::default(),
     };
 
     config.save().await?;
@@ -1984,7 +1993,7 @@ pub async fn run_models_refresh(
     force: bool,
 ) -> Result<()> {
     let provider_name = provider_override
-        .or(config.providers.fallback.as_deref())
+        .or(config.agent.default_model.as_deref().and_then(|k| k.split('/').next()))
         .unwrap_or("openrouter")
         .trim()
         .to_string();
@@ -2020,18 +2029,16 @@ pub async fn run_models_refresh(
     }
 
     let api_key = config
-        .providers
-        .fallback_provider()
-        .and_then(|e| e.api_key.clone())
+        .effective_model(None)
+        .and_then(|r| r.provider.api_key)
         .unwrap_or_default();
 
     match fetch_live_models_for_provider(
         &provider_name,
         &api_key,
         config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.base_url.as_deref()),
+            .effective_model(None)
+            .and_then(|r| r.provider.base_url.as_deref().map(|s| s.to_string())).as_deref(),
     )
     .await
     {
@@ -2080,7 +2087,7 @@ pub async fn run_models_refresh(
 
 pub async fn run_models_list(config: &Config, provider_override: Option<&str>) -> Result<()> {
     let provider_name = provider_override
-        .or(config.providers.fallback.as_deref())
+        .or(config.agent.default_model.as_deref().and_then(|k| k.split('/').next()))
         .unwrap_or("openrouter");
 
     let cached = load_any_cached_models_for_provider(&config.workspace_dir, provider_name).await?;
@@ -2104,9 +2111,10 @@ pub async fn run_models_list(config: &Config, provider_override: Option<&str>) -
     println!();
     for model in &cached.models {
         let marker = if config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.model.as_deref())
+            .agent
+            .default_model
+            .as_deref()
+            .and_then(|k| k.rsplit('/').next())
             == Some(model.as_str())
         {
             "* "
@@ -2126,7 +2134,11 @@ pub async fn run_models_set(config: &Config, model: &str) -> Result<()> {
     }
 
     let mut updated = config.clone();
-    updated.ensure_fallback_provider().model = Some(model.to_string());
+    // Build route_key from current provider + new model
+    let current_provider = updated.agent.default_model.as_deref()
+        .and_then(|k| k.split('/').next())
+        .unwrap_or("openrouter");
+    updated.set_default_model(&format!("{}/{}", current_provider, model));
     updated.save().await?;
 
     println!();
@@ -2136,30 +2148,18 @@ pub async fn run_models_set(config: &Config, model: &str) -> Result<()> {
 }
 
 pub async fn run_models_status(config: &Config) -> Result<()> {
-    let provider = config.providers.fallback.as_deref().unwrap_or("openrouter");
-    let model = config
-        .providers
-        .fallback_provider()
-        .and_then(|e| e.model.as_deref())
-        .unwrap_or("(not set)");
+    let (provider, model) = config.agent.default_model.as_deref()
+        .and_then(|k| {
+            let (p, m) = k.split_once('/')?;
+            Some((p.to_string(), m.to_string()))
+        })
+        .unwrap_or_else(|| ("openrouter".to_string(), "(not set)".to_string()));
 
     println!();
-    println!("  Provider:  {}", style(provider).cyan());
-    println!("  Model:     {}", style(model).cyan());
-    println!(
-        "  Temp:      {}",
-        style(format!(
-            "{:.1}",
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.temperature)
-                .unwrap_or(0.7)
-        ))
-        .cyan()
-    );
+    println!("  Provider:  {}", style(&provider).cyan());
+    println!("  Model:     {}", style(&model).cyan());
 
-    match load_any_cached_models_for_provider(&config.workspace_dir, provider).await? {
+    match load_any_cached_models_for_provider(&config.workspace_dir, &provider).await? {
         Some(cached) => {
             println!(
                 "  Cache:     {} models (updated {} ago)",
@@ -5978,16 +5978,15 @@ fn print_summary(config: &Config) {
     println!(
         "    {} Provider:      {}",
         style("🤖").cyan(),
-        config.providers.fallback.as_deref().unwrap_or("openrouter")
+        config.effective_model(None).map(|r| r.provider.name.clone()).unwrap_or_else(|| "openrouter".to_string())
     );
     println!(
         "    {} Model:         {}",
         style("🧠").cyan(),
         config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.model.as_deref())
-            .unwrap_or("(default)")
+            .effective_model(None)
+            .map(|r| r.model.model_id.clone())
+            .unwrap_or_else(|| "(default)".to_string())
     );
     println!(
         "    {} Autonomy:      {:?}",
@@ -6018,9 +6017,8 @@ fn print_summary(config: &Config) {
         "    {} API Key:       {}",
         style("🔑").cyan(),
         if config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref())
+            .effective_model(None)
+            .and_then(|r| r.provider.api_key)
             .is_some()
         {
             style("configured").green().to_string()
@@ -6105,13 +6103,12 @@ fn print_summary(config: &Config) {
 
     let mut step = 1u8;
 
-    let provider = config.providers.fallback.as_deref().unwrap_or("openrouter");
+    let provider = config.effective_model(None).map(|r| r.provider.name.clone()).unwrap_or_else(|| "openrouter".to_string());
     if config
-        .providers
-        .fallback_provider()
-        .and_then(|e| e.api_key.as_deref())
+        .effective_model(None)
+        .and_then(|r| r.provider.api_key)
         .is_none()
-        && !provider_supports_keyless_local_usage(provider)
+        && !provider_supports_keyless_local_usage(&provider)
     {
         if provider == "openai-codex" {
             println!(
@@ -6139,7 +6136,7 @@ fn print_summary(config: &Config) {
                 .yellow()
             );
         } else {
-            let env_var = provider_env_var(provider);
+            let env_var = provider_env_var(&provider);
             println!(
                 "    {} Set your API key:",
                 style(format!("{step}.")).cyan().bold()
@@ -6272,8 +6269,8 @@ mod tests {
         );
 
         // V2 canonical location.
-        assert_eq!(config.providers.fallback.as_deref(), Some("openrouter"));
-        let entry = &config.providers.models["openrouter"];
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
+        let entry = config.providers.iter().find(|p| p.name == "openrouter").expect("provider");
         assert_eq!(entry.api_key.as_deref(), Some("sk-updated"));
         assert_eq!(entry.model.as_deref(), Some("openai/gpt-5.2"));
         assert_eq!(
@@ -6282,12 +6279,9 @@ mod tests {
         );
 
         // Resolved through providers.
-        assert_eq!(config.providers.fallback.as_deref(), Some("openrouter"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         assert_eq!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.as_deref()),
+            config.providers.first().and_then(|p| p.api_key.as_deref()),
             Some("sk-updated")
         );
 
@@ -6301,14 +6295,14 @@ mod tests {
     fn apply_provider_update_clears_api_key_when_empty() {
         let mut config = Config::default();
         // Set up an existing provider entry.
-        config.providers.fallback = Some("anthropic".into());
-        config.providers.models.insert(
-            "anthropic".into(),
-            zeroclaw_config::schema::ModelProviderConfig {
-                api_key: Some("sk-old".into()),
-                ..Default::default()
-            },
-        );
+        config.agent.default_model = Some("anthropic/default".into());
+        config.providers.push(zeroclaw_config::schema::ProviderConfig {
+            name: "anthropic".into(),
+            api: "anthropic".into(),
+            api_key: None,
+            base_url: None,
+            model: vec![],
+        });
 
         apply_provider_update(
             &mut config,
@@ -6319,25 +6313,19 @@ mod tests {
         );
 
         // V2 canonical location.
-        assert_eq!(config.providers.fallback.as_deref(), Some("anthropic"));
-        let entry = &config.providers.models["anthropic"];
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("anthropic/")), Some(true));
+        let entry = config.providers.iter().find(|p| p.name == "anthropic").expect("provider");
         assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
         assert!(entry.api_key.is_none());
         assert!(entry.base_url.is_none());
 
         // Resolved through providers.
         assert!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.as_deref())
+            config.providers.first().and_then(|p| p.api_key.as_deref())
                 .is_none()
         );
         assert!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.base_url.as_deref())
+            config.providers.first().and_then(|p| p.base_url.as_deref())
                 .is_none()
         );
     }
@@ -6361,23 +6349,20 @@ mod tests {
         .unwrap();
 
         // V2 canonical locations.
-        assert_eq!(config.providers.fallback.as_deref(), Some("openrouter"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         assert_eq!(
-            config.providers.models["openrouter"].model.as_deref(),
+            config.effective_model(None).map(|r| r.model.model_id.as_str()),
             Some("custom-model-946")
         );
         assert_eq!(
-            config.providers.models["openrouter"].api_key.as_deref(),
+            config.providers.iter().find(|p| p.name == "openrouter").and_then(|p| p.api_key.as_deref()),
             Some("sk-issue946")
         );
 
         // Resolved through providers.
-        assert_eq!(config.providers.fallback.as_deref(), Some("openrouter"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         assert_eq!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
+            config.effective_model(None).map(|r| r.model.model_id.as_str()),
             Some("custom-model-946")
         );
 
@@ -6406,12 +6391,9 @@ mod tests {
         .unwrap();
 
         let expected = default_model_for_provider("anthropic");
-        assert_eq!(config.providers.fallback.as_deref(), Some("anthropic"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("anthropic/")), Some(true));
         assert_eq!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
+            config.effective_model(None).map(|r| r.model.model_id.as_str()),
             Some(expected.as_str())
         );
     }
@@ -6474,19 +6456,13 @@ mod tests {
         .await
         .expect("quick setup should overwrite existing config with --force");
 
-        assert_eq!(config.providers.fallback.as_deref(), Some("openrouter"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         assert_eq!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
+            config.effective_model(None).map(|r| r.model.model_id.as_str()),
             Some("custom-model-fresh")
         );
         assert_eq!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.as_deref()),
+            config.providers.first().and_then(|p| p.api_key.as_deref()),
             Some("sk-force")
         );
 
@@ -7684,7 +7660,7 @@ mod tests {
             workspace_dir: tmp.path().to_path_buf(),
             ..Default::default()
         };
-        config.providers.fallback = Some("openai".to_string());
+        config.agent.default_model = Some("openai/default".to_string());
 
         run_models_refresh(&config, None, false).await.unwrap();
     }
@@ -7698,7 +7674,7 @@ mod tests {
             ..Default::default()
         };
         // Use a non-provider channel key to keep this test deterministic and offline.
-        config.providers.fallback = Some("imessage".to_string());
+        config.agent.default_model = Some("imessage/default".to_string());
 
         let err = run_models_refresh(&config, None, true).await.unwrap_err();
         assert!(

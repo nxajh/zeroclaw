@@ -1145,29 +1145,23 @@ async fn main() -> Result<()> {
                 temperature,
                 ..
             } => {
-                let fallback = config.providers.fallback_provider();
-                let final_temperature = temperature
-                    .unwrap_or_else(|| fallback.and_then(|e| e.temperature).unwrap_or(0.7));
+                let resolved = config.effective_model(None);
+                let final_temperature = temperature.unwrap_or(0.7);
                 if let Some(p) = &provider {
-                    config.providers.fallback = Some(p.clone());
+                    config.agent.default_model = Some(p.clone());
                 }
                 if let Some(m) = &model {
-                    config.ensure_fallback_provider().model = Some(m.clone());
+                    config.set_default_model(m);
                 }
-                config.ensure_fallback_provider().temperature = Some(final_temperature);
 
-                let provider_name = config.providers.fallback.as_deref().unwrap_or("openai");
+                let provider_name = resolved.as_ref().map(|r| r.provider.name.as_str()).unwrap_or("openai");
                 let provider = zeroclaw::providers::create_provider(
                     provider_name,
-                    config
-                        .providers
-                        .fallback_provider()
-                        .and_then(|e| e.api_key.as_deref()),
+                    resolved.as_ref().and_then(|r| r.provider.api_key.as_deref()),
                 )?;
-                let model_name = config
-                    .providers
-                    .fallback_provider()
-                    .and_then(|e| e.model.as_deref())
+                let model_name = resolved
+                    .as_ref()
+                    .map(|r| r.model.model_id.as_str())
                     .unwrap_or("default");
                 match message {
                     Some(msg) => {
@@ -1217,11 +1211,7 @@ async fn main() -> Result<()> {
             peripheral,
         } => {
             let final_temperature = temperature.unwrap_or_else(|| {
-                config
-                    .providers
-                    .fallback_provider()
-                    .and_then(|e| e.temperature)
-                    .unwrap_or(0.7)
+                0.7  // temperature is now a runtime parameter
             });
 
             // Wire CLI channel for interactive mode
@@ -1471,14 +1461,14 @@ async fn main() -> Result<()> {
             println!();
             println!(
                 "🤖 Provider:      {}",
-                config.providers.fallback.as_deref().unwrap_or("openrouter")
+                config.agent.default_model.as_deref().unwrap_or("openrouter")
             );
             println!(
                 "   Model:         {}",
                 config
-                    .providers
-                    .fallback_provider()
-                    .and_then(|e| e.model.as_deref())
+                    .agent
+                    .default_model
+                    .as_deref()
                     .unwrap_or("(default)")
             );
             println!("📊 Observability:  {}", config.observability.backend);
@@ -1627,22 +1617,19 @@ async fn main() -> Result<()> {
         },
 
         Commands::Providers => {
-            let providers = providers::list_providers();
-            let current = config
-                .providers
-                .fallback
-                .as_deref()
-                .unwrap_or("openrouter")
-                .trim()
-                .to_ascii_lowercase();
-            println!("Supported providers ({} total):\n", providers.len());
+            let supported = providers::list_providers();
+            // Determine active provider name from default_model (format: "provider/model")
+            let active_provider = config.agent.default_model.as_deref()
+                .and_then(|m| m.split('/').next())
+                .unwrap_or("");
+            println!("Supported providers ({} total):\n", supported.len());
             println!("  ID (use in config)  DESCRIPTION");
             println!("  ─────────────────── ───────────");
-            for p in &providers {
-                let is_active = p.name.eq_ignore_ascii_case(&current)
+            for p in &supported {
+                let is_active = p.name.eq_ignore_ascii_case(active_provider)
                     || p.aliases
                         .iter()
-                        .any(|alias| alias.eq_ignore_ascii_case(&current));
+                        .any(|alias| alias.eq_ignore_ascii_case(active_provider));
                 let marker = if is_active { " (active)" } else { "" };
                 let local_tag = if p.local { " [local]" } else { "" };
                 let aliases = if p.aliases.is_empty() {
@@ -3587,40 +3574,12 @@ mod tests {
 
     #[test]
     #[cfg(feature = "agent-runtime")]
-    fn agent_fallback_uses_config_default_temperature() {
-        // Test that when user doesn't provide --temperature,
-        // the fallback logic works correctly
-        let mut config = Config::default();
-        config.ensure_fallback_provider().temperature = Some(1.5);
-
-        // Simulate None temperature (user didn't provide --temperature)
-        let user_temperature: Option<f64> = std::hint::black_box(None);
-        let final_temperature = user_temperature.unwrap_or_else(|| {
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.temperature)
-                .unwrap_or(0.7)
-        });
-
-        assert!((final_temperature - 1.5).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    #[cfg(feature = "agent-runtime")]
-    fn agent_fallback_uses_hardcoded_when_config_uses_default() {
-        // Test that when config uses default value (0.7), fallback still works
+    fn agent_fallback_temperature_uses_default() {
+        // Temperature is no longer in config - always use default 0.7
         let config = Config::default();
 
-        // Simulate None temperature (user didn't provide --temperature)
         let user_temperature: Option<f64> = std::hint::black_box(None);
-        let final_temperature = user_temperature.unwrap_or_else(|| {
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.temperature)
-                .unwrap_or(0.7)
-        });
+        let final_temperature = user_temperature.unwrap_or(0.7);
 
         assert!((final_temperature - 0.7).abs() < f64::EPSILON);
     }

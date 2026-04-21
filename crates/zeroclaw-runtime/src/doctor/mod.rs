@@ -434,70 +434,44 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
     }
 
     // Provider validity
-    let fallback_provider = config.providers.fallback.as_deref();
-    let fallback_provider_doc = config.providers.fallback_provider();
-    if let Some(provider) = fallback_provider {
-        if let Some(reason) = provider_validation_error(provider) {
-            items.push(DiagItem::error(
-                cat,
-                format!("default provider \"{provider}\" is invalid: {reason}"),
-            ));
-        } else {
-            items.push(DiagItem::ok(
-                cat,
-                format!("provider \"{provider}\" is valid"),
-            ));
-        }
+    let resolved = config.effective_model(None);
+    if let Some(ref rm) = resolved {
+        items.push(DiagItem::ok(
+            cat,
+            format!("default provider \"{}\" is valid", rm.provider.name),
+        ));
+    } else if config.agent.default_model.is_some() {
+        let key = config.agent.default_model.as_deref().unwrap();
+        items.push(DiagItem::error(
+            cat,
+            format!("default_model \"{key}\" cannot be resolved"),
+        ));
     } else {
-        items.push(DiagItem::error(cat, "no default_provider configured"));
+        items.push(DiagItem::error(cat, "no default_model configured"));
     }
 
     // API key presence
-    if fallback_provider != Some("ollama") {
-        if fallback_provider_doc
-            .and_then(|e| e.api_key.as_deref())
-            .is_some()
-        {
-            items.push(DiagItem::ok(cat, "API key configured"));
-        } else {
-            items.push(DiagItem::warn(
-                cat,
-                "no api_key set (may rely on env vars or provider defaults)",
-            ));
+    if let Some(ref rm) = resolved {
+        if !rm.provider.name.contains("ollama") {
+            if rm.provider.api_key.as_deref().is_some() {
+                items.push(DiagItem::ok(cat, "API key configured"));
+            } else {
+                items.push(DiagItem::warn(
+                    cat,
+                    "no api_key set (may rely on env vars or provider defaults)",
+                ));
+            }
         }
     }
 
     // Model configured
-    let default_model = fallback_provider_doc.and_then(|e| e.model.as_deref());
-    if default_model.is_some() {
+    if let Some(ref rm) = resolved {
         items.push(DiagItem::ok(
             cat,
-            format!("default model: {}", default_model.unwrap_or("?")),
+            format!("default model: {}/{}", rm.provider.name, rm.model.model_id),
         ));
     } else {
         items.push(DiagItem::warn(cat, "no default_model configured"));
-    }
-
-    // Temperature range
-    let default_temperature = fallback_provider_doc
-        .and_then(|e| e.temperature)
-        .unwrap_or(0.7);
-    if (0.0..=2.0).contains(&default_temperature) {
-        items.push(DiagItem::ok(
-            cat,
-            format!(
-                "temperature {:.1} (valid range 0.0–2.0)",
-                default_temperature
-            ),
-        ));
-    } else {
-        items.push(DiagItem::error(
-            cat,
-            format!(
-                "temperature {:.1} is out of range (expected 0.0–2.0)",
-                default_temperature
-            ),
-        ));
     }
 
     // Gateway port range
@@ -518,30 +492,40 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
         }
     }
 
-    // Model routes validation
-    for route in &config.providers.model_routes {
-        if route.hint.is_empty() {
+    // Model routes validation (v3)
+    for (hint, route_key) in &config.model_routes {
+        if hint.is_empty() {
             items.push(DiagItem::warn(cat, "model route with empty hint"));
         }
-        if let Some(reason) = provider_validation_error(&route.provider) {
+        if let Some((provider_name, model_id)) = route_key.split_once('/') {
+            if let Some(reason) = provider_validation_error(provider_name) {
+                items.push(DiagItem::warn(
+                    cat,
+                    format!(
+                        "model route \"{}\" uses invalid provider \"{}\": {}",
+                        hint, provider_name, reason
+                    ),
+                ));
+            }
+            if model_id.is_empty() {
+                items.push(DiagItem::warn(
+                    cat,
+                    format!("model route \"{}\" has empty model", hint),
+                ));
+            }
+        } else {
             items.push(DiagItem::warn(
                 cat,
                 format!(
-                    "model route \"{}\" uses invalid provider \"{}\": {}",
-                    route.hint, route.provider, reason
+                    "model route \"{}\" has invalid route_key format (expected \"provider/model\"): {}",
+                    hint, route_key
                 ),
-            ));
-        }
-        if route.model.is_empty() {
-            items.push(DiagItem::warn(
-                cat,
-                format!("model route \"{}\" has empty model", route.hint),
             ));
         }
     }
 
     // Embedding routes validation
-    for route in &config.providers.embedding_routes {
+    for route in &config.embedding_routes {
         if route.hint.trim().is_empty() {
             items.push(DiagItem::warn(cat, "embedding route with empty hint"));
         }
@@ -578,7 +562,6 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         && !config
-            .providers
             .embedding_routes
             .iter()
             .any(|route| route.hint.trim() == hint)
@@ -622,7 +605,15 @@ fn check_config_semantics(config: &Config, items: &mut Vec<DiagItem>) {
 }
 
 fn provider_validation_error(name: &str) -> Option<String> {
-    match zeroclaw_providers::create_provider(name, None) {
+    // Try to create a minimal provider config and validate via new factory
+    let config = zeroclaw_config::schema::ProviderConfig {
+        name: name.to_string(),
+        api: "openai".to_string(),
+        api_key: None,
+        base_url: None,
+        model: vec![],
+    };
+    match zeroclaw_providers::create_provider_from_config(&config) {
         Ok(_) => None,
         Err(err) => Some(
             err.to_string()
@@ -1066,40 +1057,6 @@ mod tests {
     }
 
     #[test]
-    fn config_validation_catches_bad_temperature() {
-        let mut config = Config::default();
-        config.providers.fallback = Some("default".into());
-        config
-            .providers
-            .models
-            .entry("default".into())
-            .or_default()
-            .temperature = Some(5.0);
-        let mut items = Vec::new();
-        check_config_semantics(&config, &mut items);
-        let temp_item = items.iter().find(|i| i.message.contains("temperature"));
-        assert!(temp_item.is_some());
-        assert_eq!(temp_item.unwrap().severity, Severity::Error);
-    }
-
-    #[test]
-    fn config_validation_accepts_valid_temperature() {
-        let mut config = Config::default();
-        config.providers.fallback = Some("default".into());
-        config
-            .providers
-            .models
-            .entry("default".into())
-            .or_default()
-            .temperature = Some(0.7);
-        let mut items = Vec::new();
-        check_config_semantics(&config, &mut items);
-        let temp_item = items.iter().find(|i| i.message.contains("temperature"));
-        assert!(temp_item.is_some());
-        assert_eq!(temp_item.unwrap().severity, Severity::Ok);
-    }
-
-    #[test]
     fn config_validation_warns_no_channels() {
         let config = Config::default();
         let mut items = Vec::new();
@@ -1110,37 +1067,32 @@ mod tests {
     }
 
     #[test]
-    fn config_validation_catches_unknown_provider() {
+    fn config_validation_catches_unresolvable_default_model() {
         let mut config = Config::default();
-        config.providers.fallback = Some("totally-fake".into());
+        config.agent.default_model = Some("totally-fake/model".into());
         let mut items = Vec::new();
         check_config_semantics(&config, &mut items);
         let prov_item = items
             .iter()
-            .find(|i| i.message.contains("default provider"));
+            .find(|i| i.message.contains("cannot be resolved"));
         assert!(prov_item.is_some());
         assert_eq!(prov_item.unwrap().severity, Severity::Error);
     }
 
     #[test]
-    fn config_validation_catches_malformed_custom_provider() {
+    fn config_validation_accepts_valid_default_model() {
         let mut config = Config::default();
-        config.providers.fallback = Some("custom:".into());
-        let mut items = Vec::new();
-        check_config_semantics(&config, &mut items);
-
-        let prov_item = items.iter().find(|item| {
-            item.message
-                .contains("default provider \"custom:\" is invalid")
+        config.providers.push(zeroclaw_config::schema::ProviderConfig {
+            name: "test-provider".into(),
+            api: "openai".into(),
+            api_key: Some("sk-test".into()),
+            base_url: Some("https://api.example.com/v1".into()),
+            model: vec![zeroclaw_config::schema::ModelConfig {
+                model_id: "test-model".into(),
+                ..Default::default()
+            }],
         });
-        assert!(prov_item.is_some());
-        assert_eq!(prov_item.unwrap().severity, Severity::Error);
-    }
-
-    #[test]
-    fn config_validation_accepts_custom_provider() {
-        let mut config = Config::default();
-        config.providers.fallback = Some("custom:https://my-api.com".into());
+        config.agent.default_model = Some("test-provider/test-model".into());
         let mut items = Vec::new();
         check_config_semantics(&config, &mut items);
         let prov_item = items.iter().find(|i| i.message.contains("is valid"));
@@ -1179,12 +1131,7 @@ mod tests {
     #[test]
     fn config_validation_warns_empty_model_route() {
         let mut config = Config::default();
-        config.providers.model_routes = vec![zeroclaw_config::schema::ModelRouteConfig {
-            hint: "fast".into(),
-            provider: "groq".into(),
-            model: String::new(),
-            api_key: None,
-        }];
+        config.model_routes.insert("fast".into(), "groq/".into());
         let mut items = Vec::new();
         check_config_semantics(&config, &mut items);
         let route_item = items.iter().find(|i| i.message.contains("empty model"));
@@ -1195,7 +1142,7 @@ mod tests {
     #[test]
     fn config_validation_warns_empty_embedding_route_model() {
         let mut config = Config::default();
-        config.providers.embedding_routes = vec![zeroclaw_config::schema::EmbeddingRouteConfig {
+        config.embedding_routes = vec![zeroclaw_config::schema::EmbeddingRouteConfig {
             hint: "semantic".into(),
             provider: "openai".into(),
             model: String::new(),
@@ -1216,7 +1163,7 @@ mod tests {
     #[test]
     fn config_validation_warns_invalid_embedding_route_provider() {
         let mut config = Config::default();
-        config.providers.embedding_routes = vec![zeroclaw_config::schema::EmbeddingRouteConfig {
+        config.embedding_routes = vec![zeroclaw_config::schema::EmbeddingRouteConfig {
             hint: "semantic".into(),
             provider: "groq".into(),
             model: "text-embedding-3-small".into(),
@@ -1292,10 +1239,8 @@ mod tests {
         config.agents.insert(
             "zeta".into(),
             zeroclaw_config::schema::DelegateAgentConfig {
-                provider: "totally-fake".into(),
                 model: "model-z".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -1310,10 +1255,8 @@ mod tests {
         config.agents.insert(
             "alpha".into(),
             zeroclaw_config::schema::DelegateAgentConfig {
-                provider: "totally-fake".into(),
                 model: "model-a".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,

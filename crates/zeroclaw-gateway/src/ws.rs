@@ -401,9 +401,8 @@ async fn process_chat_message(
     let provider_label = state
         .config
         .lock()
-        .providers
-        .fallback
-        .clone()
+        .effective_model(None)
+        .map(|r| r.provider.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
     // Broadcast agent_start event

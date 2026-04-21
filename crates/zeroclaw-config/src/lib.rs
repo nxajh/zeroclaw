@@ -9,7 +9,7 @@ pub mod pairing;
 pub mod platform;
 pub mod policy;
 pub mod provider_aliases;
-pub mod providers;
+
 pub mod scattered_types;
 pub mod schema;
 pub mod secrets;

@@ -709,31 +709,53 @@ async fn save_tui_config(app: &App) -> Result<()> {
 fn apply_tui_selections_to_config(app: &App, config: &mut Config) {
     // ── Provider ────────────────────────────────────────────────────
     let provider_id = app.selected_provider_id();
-    config.providers.fallback = Some(provider_id.to_string());
 
-    let entry = config
-        .providers
-        .models
-        .entry(provider_id.to_string())
-        .or_default();
+    // v3: upsert provider and set default model
+    let existing_provider = config.providers.iter().find(|p| p.name == provider_id).cloned();
+    let model_id = existing_provider
+        .as_ref()
+        .and_then(|p| p.model.first())
+        .map(|m| m.model_id.clone())
+        .unwrap_or_else(|| "default".to_string());
 
     // Clear stale custom provider URL if switching away from custom
-    if !provider_id.starts_with("custom") {
-        entry.base_url = None;
-    }
+    // (handled in v3 by re-upserting provider config)
 
-    // API key (if entered)
-    if !app.api_key_input.is_empty() {
-        entry.api_key = Some(app.api_key_input.clone());
-    }
+    // API key — update or create the provider entry
+    let api_key = if !app.api_key_input.is_empty() {
+        Some(app.api_key_input.clone())
+    } else {
+        existing_provider.as_ref().and_then(|p| p.api_key.clone())
+    };
 
     // ── Model ───────────────────────────────────────────────────────
     let model = app.selected_model();
-    if model == "Auto (recommended)" {
-        entry.model = None; // Let provider pick default
+    let model_name = if model == "Auto (recommended)" {
+        model_id.clone()
     } else {
-        entry.model = Some(model.to_string());
+        model.to_string()
+    };
+
+    // Upsert provider with updated model list
+    let mut provider_config = existing_provider.unwrap_or_else(|| {
+        zeroclaw_config::schema::ProviderConfig {
+            name: provider_id.to_string(),
+            api: "openai".to_string(),
+            api_key: api_key.clone(),
+            base_url: None,
+            model: vec![],
+        }
+    });
+    provider_config.api_key = api_key;
+    // Ensure the selected model is in the model list
+    if !provider_config.model.iter().any(|m| m.model_id == model_name) {
+        provider_config.model.push(zeroclaw_config::schema::ModelConfig {
+            model_id: model_name.clone(),
+            ..Default::default()
+        });
     }
+    config.upsert_provider_v3(provider_config);
+    config.set_default_model(&format!("{}/{}", provider_id, model_name));
 
     // Provider fields are now resolved directly from providers — no cache needed.
 
@@ -3188,7 +3210,7 @@ mod tests {
         let app = test_app(); // tier 0, provider 0 = OpenRouter
         let mut config = Config::default();
         apply_tui_selections_to_config(&app, &mut config);
-        assert_eq!(config.providers.fallback.as_deref(), Some("openrouter"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
     }
 
     #[test]
@@ -3198,7 +3220,7 @@ mod tests {
         app.provider_idx = 2; // Anthropic
         let mut config = Config::default();
         apply_tui_selections_to_config(&app, &mut config);
-        assert_eq!(config.providers.fallback.as_deref(), Some("anthropic"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("anthropic/")), Some(true));
     }
 
     #[test]
@@ -3208,7 +3230,7 @@ mod tests {
         app.provider_idx = 0; // Ollama
         let mut config = Config::default();
         apply_tui_selections_to_config(&app, &mut config);
-        assert_eq!(config.providers.fallback.as_deref(), Some("ollama"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("ollama/")), Some(true));
     }
 
     #[test]
@@ -3217,14 +3239,17 @@ mod tests {
         app.provider_tier_idx = 0;
         app.provider_idx = 0; // OpenRouter (non-custom)
         let mut config = Config::default();
-        config.ensure_fallback_provider().base_url = Some("http://old-custom-url.com".to_string());
+        config.providers.push(zeroclaw_config::schema::ProviderConfig {
+            name: "openrouter".into(),
+            api: "openai".into(),
+            api_key: None,
+            base_url: Some("http://old-custom-url.com".to_string()),
+            model: vec![],
+        });
+        config.agent.default_model = Some("openrouter/default".into());
         apply_tui_selections_to_config(&app, &mut config);
         assert!(
-            config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.base_url.as_deref())
-                .is_none(),
+            config.providers.iter().find(|p| p.name == "openrouter").and_then(|p| p.base_url.as_deref()).is_none(),
             "api_url should be cleared for non-custom providers"
         );
     }
@@ -3239,9 +3264,7 @@ mod tests {
         apply_tui_selections_to_config(&app, &mut config);
         assert_eq!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.as_deref()),
+                .providers.iter().find(|p| p.name == "openrouter" || p.name == "anthropic" || p.name == "ollama").and_then(|p| p.api_key.as_deref()),
             Some("sk-test-key-12345")
         );
     }
@@ -3250,21 +3273,19 @@ mod tests {
     fn save_no_api_key_when_empty() {
         let app = test_app(); // api_key_input is empty
         let mut config = Config::default();
-        config.providers.fallback = Some("openrouter".into());
-        config.providers.models.insert(
-            "openrouter".into(),
-            zeroclaw_config::schema::ModelProviderConfig {
-                api_key: Some("existing-key".to_string()),
-                ..Default::default()
-            },
-        );
+        config.agent.default_model = Some("openrouter/default".into());
+        config.providers.push(zeroclaw_config::schema::ProviderConfig {
+            name: "openrouter".into(),
+            api: "openai".into(),
+            api_key: Some("existing-key".to_string()),
+            base_url: None,
+            model: vec![],
+        });
         apply_tui_selections_to_config(&app, &mut config);
         // Should preserve existing key, not overwrite with empty
         assert_eq!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.as_deref()),
+                .providers.iter().find(|p| p.name == "openrouter" || p.name == "anthropic" || p.name == "ollama").and_then(|p| p.api_key.as_deref()),
             Some("existing-key")
         );
     }
@@ -3275,13 +3296,11 @@ mod tests {
     fn save_model_auto_clears_default() {
         let app = test_app(); // model_idx 0 = "Auto (recommended)"
         let mut config = Config::default();
-        config.ensure_fallback_provider().model = Some("old-model".to_string());
+        if let Some(p) = config.providers.first_mut() { if let Some(m) = p.model.first_mut() { m.model_id = "old-model".to_string(); } }
         apply_tui_selections_to_config(&app, &mut config);
         assert!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref())
+                .effective_model(None).map(|r| r.model.model_id.as_str())
                 .is_none(),
             "Auto should clear default_model"
         );
@@ -3295,9 +3314,7 @@ mod tests {
         apply_tui_selections_to_config(&app, &mut config);
         assert_eq!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
+                .effective_model(None).map(|r| r.model.model_id.as_str()),
             Some("claude-sonnet-4-20250514")
         );
     }
@@ -3310,9 +3327,7 @@ mod tests {
         apply_tui_selections_to_config(&app, &mut config);
         assert_eq!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
+                .effective_model(None).map(|r| r.model.model_id.as_str()),
             Some("gpt-4o")
         );
     }
@@ -3685,19 +3700,15 @@ mod tests {
         apply_tui_selections_to_config(&app, &mut config);
 
         // Verify everything was persisted
-        assert_eq!(config.providers.fallback.as_deref(), Some("anthropic"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("anthropic/")), Some(true));
         assert_eq!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.as_deref()),
+                .providers.iter().find(|p| p.name == "openrouter" || p.name == "anthropic" || p.name == "ollama").and_then(|p| p.api_key.as_deref()),
             Some("sk-ant-api-key")
         );
         assert_eq!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
+                .effective_model(None).map(|r| r.model.model_id.as_str()),
             Some("claude-opus-4-20250514")
         );
         assert!(config.channels.telegram.is_some());
@@ -3740,19 +3751,15 @@ mod tests {
         let mut config = Config::default();
         apply_tui_selections_to_config(&app, &mut config);
 
-        assert_eq!(config.providers.fallback.as_deref(), Some("ollama"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("ollama/")), Some(true));
         assert!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.as_deref())
+                .providers.iter().find(|p| p.name == "openrouter" || p.name == "anthropic" || p.name == "ollama").and_then(|p| p.api_key.as_deref())
                 .is_none()
         );
         assert!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref())
+                .effective_model(None).map(|r| r.model.model_id.as_str())
                 .is_none()
         );
         assert!(config.channels.telegram.is_none());
@@ -3785,12 +3792,10 @@ mod tests {
         let mut config = Config::default();
         apply_tui_selections_to_config(&app, &mut config);
 
-        assert_eq!(config.providers.fallback.as_deref(), Some("openai"));
+        assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openai/")), Some(true));
         assert_eq!(
             config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
+                .effective_model(None).map(|r| r.model.model_id.as_str()),
             Some("gpt-4o")
         );
         let dc = config.channels.discord.as_ref().unwrap();
@@ -3857,9 +3862,8 @@ mod tests {
         assert!(toml_str.contains("openrouter"));
 
         // Verify it parses back
-        let _: Config = toml::from_str::<zeroclaw_config::migration::V1Compat>(&toml_str)
-            .expect("serialized TOML should parse back")
-            .into_config();
+        let _: Config = toml::from_str(&toml_str)
+            .expect("serialized TOML should parse back");
     }
 
     #[test]
@@ -3890,9 +3894,8 @@ mod tests {
 
             let toml_str = toml::to_string(&config)
                 .unwrap_or_else(|e| panic!("failed to serialize config for {channel_name}: {e}"));
-            let _: Config = toml::from_str::<zeroclaw_config::migration::V1Compat>(&toml_str)
-                .unwrap_or_else(|e| panic!("failed to deserialize config for {channel_name}: {e}"))
-                .into_config();
+            let _: Config = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("failed to deserialize config for {channel_name}: {e}"));
         }
     }
 }

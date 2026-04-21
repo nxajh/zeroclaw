@@ -381,14 +381,14 @@ impl Agent {
             &config.workspace_dir,
         ));
 
-        let fallback_provider_ag = config.providers.fallback_provider();
+        let resolved_default_ag = config.effective_model(None);
         let memory: Arc<dyn Memory> =
             Arc::from(zeroclaw_memory::create_memory_with_storage_and_routes(
                 &config.memory,
-                &config.providers.embedding_routes,
+                &config.embedding_routes,
                 Some(&config.storage.provider.config),
                 &config.workspace_dir,
-                fallback_provider_ag.and_then(|e| e.api_key.as_deref()),
+                resolved_default_ag.as_ref().and_then(|r| r.provider.api_key.as_deref()),
             )?);
 
         let composio_key = if config.composio.enabled {
@@ -421,7 +421,7 @@ impl Agent {
             &config.web_fetch,
             &config.workspace_dir,
             &config.agents,
-            fallback_provider_ag.and_then(|e| e.api_key.as_deref()),
+            resolved_default_ag.as_ref().and_then(|r| r.provider.api_key.as_deref()),
             config,
             None,
         );
@@ -487,22 +487,26 @@ impl Agent {
             }
         }
 
-        let provider_name = config.providers.fallback.as_deref().unwrap_or("openrouter");
+        let provider_name = resolved_default_ag
+            .as_ref()
+            .map(|r| r.provider.name.as_str())
+            .unwrap_or("openrouter");
 
-        let model_name = fallback_provider_ag
-            .and_then(|e| e.model.as_deref())
+        let model_name = resolved_default_ag
+            .as_ref()
+            .map(|r| r.model.model_id.as_str())
             .unwrap_or("anthropic/claude-sonnet-4-20250514")
             .to_string();
 
         let provider_runtime_options =
             zeroclaw_providers::provider_runtime_options_from_config(config);
 
-        let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options(
+        let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options_v3(
             provider_name,
-            fallback_provider_ag.and_then(|e| e.api_key.as_deref()),
-            fallback_provider_ag.and_then(|e| e.base_url.as_deref()),
+            resolved_default_ag.as_ref().and_then(|r| r.provider.api_key.as_deref()),
+            resolved_default_ag.as_ref().and_then(|r| r.provider.base_url.as_deref()),
             &config.reliability,
-            &config.providers.model_routes,
+            &config.model_routes,
             &model_name,
             &provider_runtime_options,
         )?;
@@ -515,12 +519,7 @@ impl Agent {
             _ => Box::new(XmlToolDispatcher),
         };
 
-        let route_model_by_hint: HashMap<String, String> = config
-            .providers
-            .model_routes
-            .iter()
-            .map(|route| (route.hint.clone(), route.model.clone()))
-            .collect();
+        let route_model_by_hint = config.model_routes.clone();
         let available_hints: Vec<String> = route_model_by_hint.keys().cloned().collect();
 
         let response_cache = if config.memory.response_cache_enabled {
@@ -551,8 +550,9 @@ impl Agent {
             .config(config.agent.clone())
             .model_name(model_name)
             .temperature(
-                fallback_provider_ag
-                    .and_then(|e| e.temperature)
+                resolved_default_ag
+                    .as_ref()
+                    .and_then(|_| None::<f64>)  // temperature removed from config, use default
                     .unwrap_or(0.7),
             )
             .workspace_dir(config.workspace_dir.clone())
@@ -1312,33 +1312,29 @@ pub async fn run(
     message: Option<String>,
     provider_override: Option<String>,
     model_override: Option<String>,
-    temperature: f64,
+    _temperature: f64,
 ) -> Result<()> {
     let start = Instant::now();
 
     let mut effective_config = config;
     if let Some(p) = provider_override {
-        effective_config.providers.fallback = Some(p);
+        effective_config.agent.default_model = Some(p);
     }
     if let Some(m) = model_override {
-        effective_config.ensure_fallback_provider().model = Some(m);
+        effective_config.set_default_model(&m);
     }
-    effective_config.ensure_fallback_provider().temperature = Some(temperature);
+    // temperature is now a runtime parameter, not stored in config
 
     let mut agent = Agent::from_config(&effective_config).await?;
 
     let provider_name = effective_config
-        .providers
-        .fallback
-        .as_deref()
-        .unwrap_or("openrouter")
-        .to_string();
+        .effective_model(None)
+        .map(|r| r.provider.name.clone())
+        .unwrap_or_else(|| "openrouter".to_string());
     let model_name = effective_config
-        .providers
-        .fallback_provider()
-        .and_then(|e| e.model.as_deref())
-        .unwrap_or("anthropic/claude-sonnet-4-20250514")
-        .to_string();
+        .effective_model(None)
+        .map(|r| r.model.model_id.clone())
+        .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".to_string());
 
     agent.observer.record_event(&ObserverEvent::AgentStart {
         provider: provider_name.clone(),
@@ -1662,19 +1658,17 @@ mod tests {
             config_path: tmp.path().join("config.toml"),
             ..Default::default()
         };
-        config.providers.fallback = Some(format!("custom:http://{addr}"));
-        {
-            let entry = config.ensure_fallback_provider();
-            entry.api_key = Some("test-key".to_string());
-            entry.model = Some("test-model".to_string());
-            entry.extra_headers.insert(
-                "User-Agent".to_string(),
-                "zeroclaw-web-test/1.0".to_string(),
-            );
-            entry
-                .extra_headers
-                .insert("X-Title".to_string(), "zeroclaw-web".to_string());
-        }
+        config.providers = vec![zeroclaw_config::schema::ProviderConfig {
+            name: format!("custom:http://{addr}"),
+            api: "openai".to_string(),
+            api_key: Some("test-key".to_string()),
+            base_url: Some(format!("http://{addr}")),
+            model: vec![zeroclaw_config::schema::ModelConfig {
+                model_id: "test-model".to_string(),
+                ..Default::default()
+            }],
+        }];
+        config.agent.default_model = Some(format!("custom:http://{addr}/test-model"));
         config.memory.backend = "none".to_string();
         config.memory.auto_save = false;
 

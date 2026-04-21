@@ -6,7 +6,7 @@ use std::fs;
 use std::sync::Arc;
 use zeroclaw_api::tool::{Tool, ToolResult};
 use zeroclaw_config::policy::SecurityPolicy;
-use zeroclaw_config::schema::{ClassificationRule, Config, DelegateAgentConfig, ModelRouteConfig};
+use zeroclaw_config::schema::{ClassificationRule, Config, DelegateAgentConfig};
 
 const DEFAULT_AGENT_MAX_DEPTH: u32 = 3;
 const DEFAULT_AGENT_MAX_ITERATIONS: usize = 10;
@@ -29,14 +29,13 @@ impl ModelRoutingConfigTool {
             )
         })?;
 
-        let compat: zeroclaw_config::migration::V1Compat =
+        let mut parsed: zeroclaw_config::schema::Config =
             toml::from_str(&contents).map_err(|error| {
                 anyhow::anyhow!(
                     "Failed to parse config file {}: {error}",
                     self.config.config_path.display()
                 )
             })?;
-        let mut parsed = compat.into_config();
         parsed.config_path = self.config.config_path.clone();
         parsed.workspace_dir = self.config.workspace_dir.clone();
         Ok(parsed)
@@ -203,7 +202,7 @@ impl ModelRoutingConfigTool {
         Ok(Some(value))
     }
 
-    fn scenario_row(route: &ModelRouteConfig, rule: Option<&ClassificationRule>) -> Value {
+    fn scenario_row(hint: &str, route_key: &str, rule: Option<&ClassificationRule>) -> Value {
         let classification = rule.map(|r| {
             json!({
                 "keywords": r.keywords,
@@ -215,20 +214,15 @@ impl ModelRoutingConfigTool {
         });
 
         json!({
-            "hint": route.hint,
-            "provider": route.provider,
-            "model": route.model,
-            "api_key_configured": route
-                .api_key
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty()),
+            "hint": hint,
+            "route_key": route_key,
             "classification": classification,
         })
     }
 
     fn snapshot(cfg: &Config) -> Value {
-        let mut routes = cfg.providers.model_routes.clone();
-        routes.sort_by(|a, b| a.hint.cmp(&b.hint));
+        let mut hints: Vec<&String> = cfg.model_routes.keys().collect();
+        hints.sort();
 
         let mut rules = cfg.query_classification.rules.clone();
         rules.sort_by(|a, b| {
@@ -237,15 +231,17 @@ impl ModelRoutingConfigTool {
                 .then_with(|| a.hint.cmp(&b.hint))
         });
 
-        let mut scenarios = Vec::with_capacity(routes.len());
-        for route in &routes {
-            let rule = rules.iter().find(|r| r.hint == route.hint);
-            scenarios.push(Self::scenario_row(route, rule));
+        let mut scenarios = Vec::with_capacity(hints.len());
+        for hint in &hints {
+            let route_key = cfg.model_routes.get(*hint).unwrap();
+            let rule = rules.iter().find(|r| r.hint == **hint);
+            scenarios.push(Self::scenario_row(hint, route_key, rule));
         }
 
+        let route_hints: std::collections::HashSet<&String> = cfg.model_routes.keys().collect();
         let classification_only_rules: Vec<Value> = rules
             .iter()
-            .filter(|rule| !routes.iter().any(|route| route.hint == rule.hint))
+            .filter(|rule| !route_hints.contains(&rule.hint))
             .map(|rule| {
                 json!({
                     "hint": rule.hint,
@@ -263,7 +259,6 @@ impl ModelRoutingConfigTool {
             agents.insert(
                 name.clone(),
                 json!({
-                    "provider": agent.provider,
                     "model": agent.model,
                     "system_prompt": agent.system_prompt,
                     "api_key_configured": agent
@@ -281,9 +276,7 @@ impl ModelRoutingConfigTool {
 
         json!({
             "default": {
-                "provider": cfg.providers.fallback,
-                "model": cfg.providers.fallback_provider().and_then(|e| e.model.as_deref()),
-                "temperature": cfg.providers.fallback_provider().and_then(|e| e.temperature).unwrap_or(0.7),
+                "route_key": cfg.agent.default_model,
             },
             "query_classification": {
                 "enabled": cfg.query_classification.enabled,
@@ -293,11 +286,6 @@ impl ModelRoutingConfigTool {
             "classification_only_rules": classification_only_rules,
             "agents": agents,
         })
-    }
-
-    fn normalize_and_sort_routes(routes: &mut Vec<ModelRouteConfig>) {
-        routes.retain(|route| !route.hint.trim().is_empty());
-        routes.sort_by(|a, b| a.hint.cmp(&b.hint));
     }
 
     fn normalize_and_sort_rules(rules: &mut Vec<ClassificationRule>) {
@@ -334,10 +322,9 @@ impl ModelRoutingConfigTool {
     fn handle_list_hints(&self) -> anyhow::Result<ToolResult> {
         let cfg = self.load_config_without_env()?;
         let mut route_hints: Vec<String> = cfg
-            .providers
             .model_routes
-            .iter()
-            .map(|r| r.hint.clone())
+            .keys()
+            .cloned()
             .collect();
         route_hints.sort();
         route_hints.dedup();
@@ -383,158 +370,105 @@ impl ModelRoutingConfigTool {
     async fn handle_set_default(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let provider_update = Self::parse_optional_string_update(args, "provider")?;
         let model_update = Self::parse_optional_string_update(args, "model")?;
-        let temperature_update = Self::parse_optional_f64_update(args, "temperature")?;
 
         let any_update = !matches!(provider_update, MaybeSet::Unset)
-            || !matches!(model_update, MaybeSet::Unset)
-            || !matches!(temperature_update, MaybeSet::Unset);
+            || !matches!(model_update, MaybeSet::Unset);
 
         if !any_update {
-            anyhow::bail!("set_default requires at least one of: provider, model, temperature");
+            anyhow::bail!("set_default requires at least one of: provider, model");
         }
 
         let mut cfg = self.load_config_without_env()?;
 
         // Capture previous values for rollback on probe failure.
-        let previous_provider = cfg.providers.fallback.clone();
-        let previous_fallback_provider = cfg
-            .providers
-            .fallback
-            .as_deref()
-            .and_then(|name| cfg.providers.models.get(name))
-            .cloned();
+        let previous_default_model = cfg.agent.default_model.clone();
 
-        let fallback_name = match &provider_update {
-            MaybeSet::Set(provider) => {
-                cfg.providers.fallback = Some(provider.clone());
-                provider.clone()
-            }
-            MaybeSet::Null => {
-                cfg.providers.fallback = None;
-                "default".to_string()
-            }
-            MaybeSet::Unset => cfg.providers.fallback.clone().unwrap_or_else(|| {
-                let name = "default".to_string();
-                cfg.providers.fallback = Some(name.clone());
-                name
-            }),
+        // Build the new route_key from provider + model updates
+        let current_route_key = cfg.agent.default_model.as_deref().unwrap_or("");
+        let (current_provider, current_model_id) = current_route_key
+            .split_once('/')
+            .unwrap_or(("", ""));
+
+        let new_provider = match &provider_update {
+            MaybeSet::Set(p) => p.clone(),
+            MaybeSet::Null => current_provider.to_string(),
+            MaybeSet::Unset => current_provider.to_string(),
         };
 
-        let entry = cfg.providers.models.entry(fallback_name).or_default();
+        let new_model = match &model_update {
+            MaybeSet::Set(m) => m.clone(),
+            MaybeSet::Null => current_model_id.to_string(),
+            MaybeSet::Unset => current_model_id.to_string(),
+        };
 
-        match model_update {
-            MaybeSet::Set(model) => entry.model = Some(model),
-            MaybeSet::Null => entry.model = None,
-            MaybeSet::Unset => {}
-        }
-
-        match temperature_update {
-            MaybeSet::Set(temperature) => {
-                if !(0.0..=2.0).contains(&temperature) {
-                    anyhow::bail!("'temperature' must be between 0.0 and 2.0");
-                }
-                entry.temperature = Some(temperature);
-            }
-            MaybeSet::Null => {
-                entry.temperature = None;
-            }
-            MaybeSet::Unset => {}
-        }
+        let new_route_key = format!("{new_provider}/{new_model}");
+        cfg.set_default_model(&new_route_key);
 
         cfg.save().await?;
 
         // Probe the new model with a minimal API call to catch invalid model IDs
         // before the channel hot-reload picks up the change.
-        let current_provider = cfg.providers.fallback.clone();
-        let current_model = cfg
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.model.clone());
-        if let (Some(provider_name), Some(model_name)) = (current_provider, current_model)
-            && let Err(probe_err) = self.probe_model(&provider_name, &model_name).await
-        {
-            if zeroclaw_providers::reliable::is_non_retryable(&probe_err) {
-                let reverted_model = previous_fallback_provider
-                    .as_ref()
-                    .and_then(|e| e.model.as_deref())
-                    .unwrap_or("(none)")
-                    .to_string();
+        if let Some(resolved) = cfg.resolve_model(&new_route_key) {
+            if let Some(api_key) = resolved.provider.api_key.as_deref() {
+                if !api_key.trim().is_empty() {
+                    let provider_cfg = &resolved.provider;
+                    let provider = match zeroclaw_providers::create_provider_from_config(provider_cfg) {
+                        Ok(p) => p,
+                        Err(_) => return Ok(ToolResult {
+                            success: true,
+                            output: serde_json::to_string_pretty(&json!({
+                                "message": "Default model updated (probe skipped)",
+                                "config": Self::snapshot(&cfg),
+                            }))?,
+                            error: None,
+                        }),
+                    };
 
-                // Rollback to previous config.
-                cfg.providers.fallback = previous_provider;
-                if let Some(prev_entry) = previous_fallback_provider
-                    && let Some(fb) = cfg.providers.fallback.as_deref()
-                {
-                    cfg.providers.models.insert(fb.to_string(), prev_entry);
+                    if let Err(probe_err) = provider
+                        .chat_with_system(Some("Respond with OK."), "ping", &resolved.model.model_id, 0.0)
+                        .await
+                    {
+                        if zeroclaw_providers::reliable::is_non_retryable(&probe_err) {
+                            // Rollback to previous config.
+                            cfg.agent.default_model = previous_default_model;
+                            cfg.save().await?;
+
+                            return Ok(ToolResult {
+                                success: false,
+                                output: format!(
+                                    "Model '{new_route_key}' is not available: {probe_err}. Reverted.",
+                                ),
+                                error: None,
+                            });
+                        }
+                        tracing::warn!(
+                            route_key = %new_route_key,
+                            "Model probe returned retryable error (keeping new config): {probe_err}"
+                        );
+                    }
                 }
-                cfg.save().await?;
-
-                return Ok(ToolResult {
-                    success: false,
-                    output: format!(
-                        "Model '{model_name}' is not available: {probe_err}. Reverted to '{reverted_model}'.",
-                    ),
-                    error: None,
-                });
             }
-            // Retryable errors (e.g. transient network issues) — keep the
-            // new config and let the resilient wrapper handle retries.
-            tracing::warn!(
-                model = %model_name,
-                "Model probe returned retryable error (keeping new config): {probe_err}"
-            );
         }
 
         Ok(ToolResult {
             success: true,
             output: serde_json::to_string_pretty(&json!({
-                "message": "Default provider/model settings updated",
+                "message": "Default model settings updated",
                 "config": Self::snapshot(&cfg),
             }))?,
             error: None,
         })
     }
 
-    /// Send a minimal 1-token chat request to verify the model is accessible.
-    /// Returns `Ok(())` if the probe succeeds **or** if no API key is available
-    /// (the probe would fail with an auth error unrelated to model validity).
-    /// Provider construction failures are also treated as non-fatal.
-    async fn probe_model(&self, provider_name: &str, model: &str) -> anyhow::Result<()> {
-        // Use the runtime config's API key (which includes env-sourced keys),
-        // not the on-disk config (which may have no key at all).
-        let api_key = self
-            .config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref());
-        if api_key.is_none_or(|k| k.trim().is_empty()) {
-            return Ok(());
-        }
-
-        let provider = match zeroclaw_providers::create_provider_with_url(
-            provider_name,
-            api_key,
-            self.config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.base_url.as_deref()),
-        ) {
-            Ok(p) => p,
-            Err(_) => return Ok(()),
-        };
-
-        provider
-            .chat_with_system(Some("Respond with OK."), "ping", model, 0.0)
-            .await?;
-
-        Ok(())
-    }
-
     async fn handle_upsert_scenario(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let hint = Self::parse_non_empty_string(args, "hint")?;
-        let provider = Self::parse_non_empty_string(args, "provider")?;
-        let model = Self::parse_non_empty_string(args, "model")?;
-        let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
+        let route_key = if let Some(rk) = args.get("route_key").and_then(Value::as_str) {
+            rk.to_string()
+        } else {
+            let provider = Self::parse_non_empty_string(args, "provider")?;
+            let model = Self::parse_non_empty_string(args, "model")?;
+            format!("{provider}/{model}")
+        };
 
         let keywords_update = if let Some(raw) = args.get("keywords") {
             Some(Self::parse_string_list(raw, "keywords")?)
@@ -560,35 +494,8 @@ impl ModelRoutingConfigTool {
 
         let mut cfg = self.load_config_without_env()?;
 
-        let existing_route = cfg
-            .providers
-            .model_routes
-            .iter()
-            .find(|route| route.hint == hint)
-            .cloned();
-
-        let mut next_route = existing_route.unwrap_or(ModelRouteConfig {
-            hint: hint.clone(),
-            provider: provider.clone(),
-            model: model.clone(),
-            api_key: None,
-        });
-
-        next_route.hint = hint.clone();
-        next_route.provider = provider;
-        next_route.model = model;
-
-        match api_key_update {
-            MaybeSet::Set(api_key) => next_route.api_key = Some(api_key),
-            MaybeSet::Null => next_route.api_key = None,
-            MaybeSet::Unset => {}
-        }
-
-        cfg.providers
-            .model_routes
-            .retain(|route| route.hint != hint);
-        cfg.providers.model_routes.push(next_route);
-        Self::normalize_and_sort_routes(&mut cfg.providers.model_routes);
+        // Set route using new v3 API
+        cfg.set_route(&hint, &route_key);
 
         if should_touch_rule {
             if matches!(classification_enabled, Some(false)) {
@@ -675,11 +582,8 @@ impl ModelRoutingConfigTool {
 
         let mut cfg = self.load_config_without_env()?;
 
-        let before_routes = cfg.providers.model_routes.len();
-        cfg.providers
-            .model_routes
-            .retain(|route| route.hint != hint);
-        let routes_removed = before_routes.saturating_sub(cfg.providers.model_routes.len());
+        let route_existed = cfg.model_routes.contains_key(&hint);
+        cfg.remove_route(&hint);
 
         let mut rules_removed = 0usize;
         if remove_classification {
@@ -690,11 +594,10 @@ impl ModelRoutingConfigTool {
             rules_removed = before_rules.saturating_sub(cfg.query_classification.rules.len());
         }
 
-        if routes_removed == 0 && rules_removed == 0 {
+        if !route_existed && rules_removed == 0 {
             anyhow::bail!("No scenario found for hint '{hint}'");
         }
 
-        Self::normalize_and_sort_routes(&mut cfg.providers.model_routes);
         Self::normalize_and_sort_rules(&mut cfg.query_classification.rules);
         cfg.query_classification.enabled = !cfg.query_classification.rules.is_empty();
 
@@ -705,7 +608,7 @@ impl ModelRoutingConfigTool {
             output: serde_json::to_string_pretty(&json!({
                 "message": "Scenario removed",
                 "hint": hint,
-                "routes_removed": routes_removed,
+                "route_removed": route_existed,
                 "classification_rules_removed": rules_removed,
                 "config": Self::snapshot(&cfg),
             }))?,
@@ -715,8 +618,13 @@ impl ModelRoutingConfigTool {
 
     async fn handle_upsert_agent(&self, args: &Value) -> anyhow::Result<ToolResult> {
         let name = Self::parse_non_empty_string(args, "name")?;
-        let provider = Self::parse_non_empty_string(args, "provider")?;
-        let model = Self::parse_non_empty_string(args, "model")?;
+        let model_route_key = if let Some(rk) = args.get("route_key").and_then(Value::as_str) {
+            rk.to_string()
+        } else {
+            let provider = Self::parse_non_empty_string(args, "provider")?;
+            let model_id = Self::parse_non_empty_string(args, "model")?;
+            format!("{provider}/{model_id}")
+        };
 
         let system_prompt_update = Self::parse_optional_string_update(args, "system_prompt")?;
         let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
@@ -738,10 +646,8 @@ impl ModelRoutingConfigTool {
             .get(&name)
             .cloned()
             .unwrap_or(DelegateAgentConfig {
-                provider: provider.clone(),
-                model: model.clone(),
+                model: model_route_key.clone(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: DEFAULT_AGENT_MAX_DEPTH,
                 agentic: false,
@@ -753,8 +659,7 @@ impl ModelRoutingConfigTool {
                 memory_namespace: None,
             });
 
-        next_agent.provider = provider;
-        next_agent.model = model;
+        next_agent.model = model_route_key;
 
         match system_prompt_update {
             MaybeSet::Set(value) => next_agent.system_prompt = Some(value),

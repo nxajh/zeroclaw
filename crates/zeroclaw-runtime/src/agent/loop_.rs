@@ -2056,15 +2056,15 @@ pub async fn run(
         &config.workspace_dir,
     ));
 
-    let fallback_provider_loop = config.providers.fallback_provider();
+    let resolved_default = config.effective_model(None);
 
     // ── Memory (the brain) ────────────────────────────────────────
     let mem: Arc<dyn Memory> = Arc::from(zeroclaw_memory::create_memory_with_storage_and_routes(
         &config.memory,
-        &config.providers.embedding_routes,
+        &config.embedding_routes,
         Some(&config.storage.provider.config),
         &config.workspace_dir,
-        fallback_provider_loop.and_then(|e| e.api_key.as_deref()),
+        resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
     )?);
     tracing::info!(backend = mem.name(), "Memory initialized");
 
@@ -2104,7 +2104,7 @@ pub async fn run(
         &config.web_fetch,
         &config.workspace_dir,
         &config.agents,
-        fallback_provider_loop.and_then(|e| e.api_key.as_deref()),
+        resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
         &config,
         None,
     );
@@ -2209,25 +2209,25 @@ pub async fn run(
     // ── Resolve provider ─────────────────────────────────────────
     let mut provider_name = provider_override
         .as_deref()
-        .or(config.providers.fallback.as_deref())
+        .or(resolved_default.as_ref().map(|r| r.provider.name.as_str()))
         .unwrap_or("openrouter")
         .to_string();
 
     let mut model_name = model_override
         .as_deref()
-        .or(fallback_provider_loop.and_then(|e| e.model.as_deref()))
+        .or(resolved_default.as_ref().map(|r| r.model.model_id.as_str()))
         .unwrap_or("anthropic/claude-sonnet-4")
         .to_string();
 
     let provider_runtime_options =
         zeroclaw_providers::provider_runtime_options_from_config(&config);
 
-    let mut provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options(
+    let mut provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options_v3(
         &provider_name,
-        fallback_provider_loop.and_then(|e| e.api_key.as_deref()),
-        fallback_provider_loop.and_then(|e| e.base_url.as_deref()),
+        resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
+        resolved_default.as_ref().and_then(|r| r.provider.base_url.as_deref()),
         &config.reliability,
-        &config.providers.model_routes,
+        &config.model_routes,
         &model_name,
         &provider_runtime_options,
     )?;
@@ -2518,6 +2518,8 @@ pub async fn run(
             format!("{context}[{now}] {effective_msg}")
         };
 
+        tracing::info!("system_prompt:\n{system_prompt}");
+
         let mut history = vec![
             ChatMessage::system(&system_prompt),
             ChatMessage::user(&enriched),
@@ -2589,12 +2591,12 @@ pub async fn run(
                             new_model
                         );
 
-                        provider = zeroclaw_providers::create_routed_provider_with_options(
+                        provider = zeroclaw_providers::create_routed_provider_with_options_v3(
                             &new_provider,
-                            fallback_provider_loop.and_then(|e| e.api_key.as_deref()),
-                            fallback_provider_loop.and_then(|e| e.base_url.as_deref()),
+                            resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
+                            resolved_default.as_ref().and_then(|r| r.provider.base_url.as_deref()),
                             &config.reliability,
-                            &config.providers.model_routes,
+                            &config.model_routes,
                             &new_model,
                             &provider_runtime_options,
                         )?;
@@ -2901,12 +2903,12 @@ pub async fn run(
                                 new_model
                             );
 
-                            provider = zeroclaw_providers::create_routed_provider_with_options(
+                            provider = zeroclaw_providers::create_routed_provider_with_options_v3(
                                 &new_provider,
-                                fallback_provider_loop.and_then(|e| e.api_key.as_deref()),
-                                fallback_provider_loop.and_then(|e| e.base_url.as_deref()),
+                                resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
+                                resolved_default.as_ref().and_then(|r| r.provider.base_url.as_deref()),
                                 &config.reliability,
-                                &config.providers.model_routes,
+                                &config.model_routes,
                                 &new_model,
                                 &provider_runtime_options,
                             )?;
@@ -3060,14 +3062,14 @@ pub async fn process_message(
         &config.autonomy,
         &config.workspace_dir,
     ));
-    let fallback_provider_pm = config.providers.fallback_provider();
+    let resolved_default_pm = config.effective_model(None);
     let approval_manager = ApprovalManager::for_non_interactive(&config.autonomy);
     let mem: Arc<dyn Memory> = Arc::from(zeroclaw_memory::create_memory_with_storage_and_routes(
         &config.memory,
-        &config.providers.embedding_routes,
+        &config.embedding_routes,
         Some(&config.storage.provider.config),
         &config.workspace_dir,
-        fallback_provider_pm.and_then(|e| e.api_key.as_deref()),
+        resolved_default_pm.as_ref().and_then(|r| r.provider.api_key.as_deref()),
     )?);
 
     let (composio_key, composio_entity_id) = if config.composio.enabled {
@@ -3097,7 +3099,7 @@ pub async fn process_message(
         &config.web_fetch,
         &config.workspace_dir,
         &config.agents,
-        fallback_provider_pm.and_then(|e| e.api_key.as_deref()),
+        resolved_default_pm.as_ref().and_then(|r| r.provider.api_key.as_deref()),
         &config,
         None,
     );
@@ -3174,18 +3176,23 @@ pub async fn process_message(
         }
     }
 
-    let provider_name = config.providers.fallback.as_deref().unwrap_or("openrouter");
-    let model_name = fallback_provider_pm
-        .and_then(|e| e.model.clone())
-        .unwrap_or_else(|| "anthropic/claude-sonnet-4-20250514".into());
+    let provider_name = resolved_default_pm
+        .as_ref()
+        .map(|r| r.provider.name.as_str())
+        .unwrap_or("openrouter");
+    let model_name = resolved_default_pm
+        .as_ref()
+        .map(|r| r.model.model_id.as_str())
+        .unwrap_or("anthropic/claude-sonnet-4-20250514")
+        .to_string();
     let provider_runtime_options =
         zeroclaw_providers::provider_runtime_options_from_config(&config);
-    let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options(
+    let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options_v3(
         provider_name,
-        fallback_provider_pm.and_then(|e| e.api_key.as_deref()),
-        fallback_provider_pm.and_then(|e| e.base_url.as_deref()),
+        resolved_default_pm.as_ref().and_then(|r| r.provider.api_key.as_deref()),
+        resolved_default_pm.as_ref().and_then(|r| r.provider.base_url.as_deref()),
         &config.reliability,
-        &config.providers.model_routes,
+        &config.model_routes,
         &model_name,
         &provider_runtime_options,
     )?;
@@ -3329,12 +3336,7 @@ pub async fn process_message(
     );
     let thinking_params = crate::agent::thinking::apply_thinking_level(thinking_level);
     let effective_temperature = crate::agent::thinking::clamp_temperature(
-        config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.temperature)
-            .unwrap_or(0.7)
-            + thinking_params.temperature_adjustment,
+        0.7 + thinking_params.temperature_adjustment,
     );
 
     // Prepend thinking system prompt prefix when present.

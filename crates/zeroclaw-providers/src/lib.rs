@@ -736,40 +736,21 @@ impl Default for ProviderRuntimeOptions {
 pub fn provider_runtime_options_from_config(
     config: &zeroclaw_config::schema::Config,
 ) -> ProviderRuntimeOptions {
-    let fallback = config.providers.fallback_provider();
-    // Resolve merge_system_into_user from the active model provider profile by
-    // matching api_url — apply_named_model_provider_profile() has already run
-    // and rewritten providers.fallback, but providers.models retains all profiles.
-    let merge_system_into_user = fallback
-        .and_then(|e| e.base_url.as_deref())
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-        .and_then(|active_url| {
-            config.providers.models.values().find(|p| {
-                p.base_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|u| !u.is_empty())
-                    .map(|u| u.trim_end_matches('/'))
-                    == Some(active_url.trim_end_matches('/'))
-            })
-        })
-        .map(|p| p.merge_system_into_user)
-        .unwrap_or(false);
+    let resolved = config.effective_model(None);
+    let fallback_api_url = resolved.as_ref().and_then(|r| r.provider.base_url.clone());
+    let merge_system_into_user = false; // v3: not a config concern
 
     ProviderRuntimeOptions {
         auth_profile_override: None,
-        provider_api_url: fallback.and_then(|e| e.base_url.clone()),
+        provider_api_url: fallback_api_url,
         zeroclaw_dir: config.config_path.parent().map(PathBuf::from),
         secrets_encrypt: config.secrets.encrypt,
         reasoning_enabled: config.runtime.reasoning_enabled,
         reasoning_effort: config.runtime.reasoning_effort.clone(),
-        provider_timeout_secs: Some(fallback.and_then(|e| e.timeout_secs).unwrap_or(120)),
-        extra_headers: fallback
-            .map(|e| e.extra_headers.clone())
-            .unwrap_or_default(),
-        api_path: fallback.and_then(|e| e.api_path.clone()),
-        provider_max_tokens: fallback.and_then(|e| e.max_tokens),
+        provider_timeout_secs: Some(120),
+        extra_headers: Default::default(),
+        api_path: None,
+        provider_max_tokens: resolved.as_ref().and_then(|r| r.model.max_tokens),
         merge_system_into_user,
     }
 }
@@ -1076,6 +1057,50 @@ fn parse_custom_provider_url(
 /// Factory: create the right provider from config (without custom URL)
 pub fn create_provider(name: &str, api_key: Option<&str>) -> anyhow::Result<Box<dyn Provider>> {
     create_provider_with_options(name, api_key, &ProviderRuntimeOptions::default())
+}
+
+/// Factory (v3): create provider from a `ProviderConfig` struct.
+///
+/// This is the new entry point for the redesigned provider/model configuration.
+/// It replaces the huge `create_provider_with_url_and_options` match by driving
+/// all decisions from the config struct's `api` field.
+pub fn create_provider_from_config(
+    config: &zeroclaw_config::schema::ProviderConfig,
+) -> anyhow::Result<Box<dyn Provider>> {
+    let api_key = config.api_key.as_deref();
+    let base_url = config.base_url.as_deref().unwrap_or("");
+
+    // Resolve credential, breaking taint chain for sensitive data
+    let resolved_credential = resolve_provider_credential(&config.name, api_key)
+        .map(|v| String::from_utf8(v.into_bytes()).unwrap_or_default());
+    let key = resolved_credential.as_deref();
+
+    match config.api.as_str() {
+        "openai" => {
+            let p = OpenAiCompatibleProvider::new(
+                &config.name,
+                base_url,
+                key,
+                AuthStyle::Bearer,
+            );
+            Ok(Box::new(p))
+        }
+        "anthropic" => {
+            let mut p = if base_url.is_empty() {
+                anthropic::AnthropicProvider::new(key)
+            } else {
+                anthropic::AnthropicProvider::with_base_url(key, Some(base_url))
+            };
+            // Anthropic requires max_tokens — if not set, use default 4096
+            if let Some(mt) = config.model.first().and_then(|m| m.max_tokens) {
+                p = p.with_max_tokens(mt);
+            }
+            Ok(Box::new(p))
+        }
+        other => {
+            anyhow::bail!("Unknown API format: {other}. Supported: openai, anthropic")
+        }
+    }
 }
 
 /// Factory: create provider with runtime options (auth profile override, state dir).
@@ -1837,38 +1862,18 @@ pub fn create_resilient_provider_with_options(
     Ok(Box::new(reliable))
 }
 
-/// Create a RouterProvider if model routes are configured, otherwise return a
-/// standard resilient provider. The router wraps individual providers per route,
-/// each with its own retry/fallback chain.
-pub fn create_routed_provider(
+/// Create a routed provider using the new v3 config format (HashMap hint -> "provider/model").
+pub fn create_routed_provider_with_options_v3(
     primary_name: &str,
     api_key: Option<&str>,
     api_url: Option<&str>,
     reliability: &zeroclaw_config::schema::ReliabilityConfig,
-    model_routes: &[zeroclaw_config::schema::ModelRouteConfig],
-    default_model: &str,
-) -> anyhow::Result<Box<dyn Provider>> {
-    create_routed_provider_with_options(
-        primary_name,
-        api_key,
-        api_url,
-        reliability,
-        model_routes,
-        default_model,
-        &ProviderRuntimeOptions::default(),
-    )
-}
-
-/// Create a routed provider using explicit runtime options.
-pub fn create_routed_provider_with_options(
-    primary_name: &str,
-    api_key: Option<&str>,
-    api_url: Option<&str>,
-    reliability: &zeroclaw_config::schema::ReliabilityConfig,
-    model_routes: &[zeroclaw_config::schema::ModelRouteConfig],
+    model_routes: &std::collections::HashMap<String, String>,
     default_model: &str,
     options: &ProviderRuntimeOptions,
 ) -> anyhow::Result<Box<dyn Provider>> {
+    use std::collections::HashSet;
+
     if model_routes.is_empty() {
         return create_resilient_provider_with_options(
             primary_name,
@@ -1879,30 +1884,36 @@ pub fn create_routed_provider_with_options(
         );
     }
 
-    // Collect unique provider names needed
-    let mut needed: Vec<String> = vec![primary_name.to_string()];
-    for route in model_routes {
-        if !needed.iter().any(|n| n == &route.provider) {
-            needed.push(route.provider.clone());
-        }
+    // Parse routes and collect unique provider names
+    let mut parsed_routes: Vec<(String, router::Route)> = Vec::new();
+    let mut needed: HashSet<String> = HashSet::new();
+    needed.insert(primary_name.to_string());
+
+    for (hint, route_key) in model_routes {
+        // Parse "provider/model_id" format
+        let (provider_name, model_id) = match route_key.split_once('/') {
+            Some((p, m)) => (p.to_string(), m.to_string()),
+            None => {
+                // If no slash, assume it's just the provider name
+                (route_key.clone(), default_model.to_string())
+            }
+        };
+        needed.insert(provider_name.clone());
+        parsed_routes.push((
+            hint.clone(),
+            router::Route {
+                provider_name,
+                model: model_id,
+            },
+        ));
     }
 
     // Create each provider (with its own resilience wrapper)
     let mut providers: Vec<(String, Box<dyn Provider>)> = Vec::new();
-    for name in &needed {
-        let routed_credential = model_routes
-            .iter()
-            .find(|r| &r.provider == name)
-            .and_then(|r| {
-                r.api_key.as_ref().and_then(|raw_key| {
-                    let trimmed_key = raw_key.trim();
-                    (!trimmed_key.is_empty()).then_some(trimmed_key)
-                })
-            });
-        let key = routed_credential.or(api_key);
+    for name in needed {
         // Only use api_url for the primary provider
         let url = if name == primary_name { api_url } else { None };
-        match create_resilient_provider_with_options(name, key, url, reliability, options) {
+        match create_resilient_provider_with_options(&name, api_key, url, reliability, options) {
             Ok(provider) => providers.push((name.clone(), provider)),
             Err(e) => {
                 if name == primary_name {
@@ -1916,23 +1927,9 @@ pub fn create_routed_provider_with_options(
         }
     }
 
-    // Build route table
-    let routes: Vec<(String, router::Route)> = model_routes
-        .iter()
-        .map(|r| {
-            (
-                r.hint.clone(),
-                router::Route {
-                    provider_name: r.provider.clone(),
-                    model: r.model.clone(),
-                },
-            )
-        })
-        .collect();
-
     Ok(Box::new(router::RouterProvider::new(
         providers,
-        routes,
+        parsed_routes,
         default_model.to_string(),
     )))
 }

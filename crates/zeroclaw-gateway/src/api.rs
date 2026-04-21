@@ -118,7 +118,7 @@ pub async fn handle_api_status(
         .unwrap_or_else(zeroclaw_runtime::i18n::detect_locale);
 
     let body = serde_json::json!({
-        "provider": config.providers.fallback,
+        "provider": config.agent.default_model.as_deref().unwrap_or(""),
         "model": state.model,
         "temperature": state.temperature,
         "uptime_seconds": health.uptime_seconds,
@@ -852,23 +852,6 @@ fn normalize_route_field(value: &str) -> String {
     value.trim().to_ascii_lowercase()
 }
 
-fn model_route_identity_matches(
-    incoming: &zeroclaw_config::schema::ModelRouteConfig,
-    current: &zeroclaw_config::schema::ModelRouteConfig,
-) -> bool {
-    normalize_route_field(&incoming.hint) == normalize_route_field(&current.hint)
-        && normalize_route_field(&incoming.provider) == normalize_route_field(&current.provider)
-        && normalize_route_field(&incoming.model) == normalize_route_field(&current.model)
-}
-
-fn model_route_provider_model_matches(
-    incoming: &zeroclaw_config::schema::ModelRouteConfig,
-    current: &zeroclaw_config::schema::ModelRouteConfig,
-) -> bool {
-    normalize_route_field(&incoming.provider) == normalize_route_field(&current.provider)
-        && normalize_route_field(&incoming.model) == normalize_route_field(&current.model)
-}
-
 fn embedding_route_identity_matches(
     incoming: &zeroclaw_config::schema::EmbeddingRouteConfig,
     current: &zeroclaw_config::schema::EmbeddingRouteConfig,
@@ -884,49 +867,6 @@ fn embedding_route_provider_model_matches(
 ) -> bool {
     normalize_route_field(&incoming.provider) == normalize_route_field(&current.provider)
         && normalize_route_field(&incoming.model) == normalize_route_field(&current.model)
-}
-
-fn restore_model_route_api_keys(
-    incoming: &mut [zeroclaw_config::schema::ModelRouteConfig],
-    current: &[zeroclaw_config::schema::ModelRouteConfig],
-) {
-    let mut used_current = vec![false; current.len()];
-    for incoming_route in incoming {
-        if !incoming_route
-            .api_key
-            .as_deref()
-            .is_some_and(is_masked_secret)
-        {
-            continue;
-        }
-
-        let exact_match_idx = current
-            .iter()
-            .enumerate()
-            .find(|(idx, current_route)| {
-                !used_current[*idx] && model_route_identity_matches(incoming_route, current_route)
-            })
-            .map(|(idx, _)| idx);
-
-        let match_idx = exact_match_idx.or_else(|| {
-            current
-                .iter()
-                .enumerate()
-                .find(|(idx, current_route)| {
-                    !used_current[*idx]
-                        && model_route_provider_model_matches(incoming_route, current_route)
-                })
-                .map(|(idx, _)| idx)
-        });
-
-        if let Some(idx) = match_idx {
-            used_current[idx] = true;
-            incoming_route.api_key = current[idx].api_key.clone();
-        } else {
-            // Never persist UI placeholders to disk when no safe restore target exists.
-            incoming_route.api_key = None;
-        }
-    }
 }
 
 fn restore_embedding_route_api_keys(
@@ -997,13 +937,10 @@ fn mask_sensitive_fields(
     }
 
     // Mask providers
-    for model in masked.providers.models.values_mut() {
-        mask_optional_secret(&mut model.api_key);
+    for provider in &mut masked.providers {
+        mask_optional_secret(&mut provider.api_key);
     }
-    for route in &mut masked.providers.model_routes {
-        mask_optional_secret(&mut route.api_key);
-    }
-    for route in &mut masked.providers.embedding_routes {
+    for route in &mut masked.embedding_routes {
         mask_optional_secret(&mut route.api_key);
     }
 
@@ -1125,13 +1062,9 @@ fn restore_masked_sensitive_fields(
             restore_optional_secret(&mut agent.api_key, &current_agent.api_key);
         }
     }
-    restore_model_route_api_keys(
-        &mut incoming.providers.model_routes,
-        &current.providers.model_routes,
-    );
     restore_embedding_route_api_keys(
-        &mut incoming.providers.embedding_routes,
-        &current.providers.embedding_routes,
+        &mut incoming.embedding_routes,
+        &current.embedding_routes,
     );
 
     if let (Some(incoming_ch), Some(current_ch)) = (
@@ -1271,10 +1204,10 @@ fn restore_masked_sensitive_fields(
         &current.transcription.api_key,
     );
 
-    // Restore api_keys inside providers.models entries.
-    for (name, incoming_entry) in &mut incoming.providers.models {
-        if let Some(current_entry) = current.providers.models.get(name) {
-            restore_optional_secret(&mut incoming_entry.api_key, &current_entry.api_key);
+    // Restore api_keys inside providers entries.
+    for provider in &mut incoming.providers {
+        if let Some(current_provider) = current.find_provider_v3(&provider.name) {
+            restore_optional_secret(&mut provider.api_key, &current_provider.api_key);
         }
     }
 }
@@ -1693,15 +1626,11 @@ mod tests {
     #[test]
     fn masking_keeps_toml_valid_and_preserves_api_keys_type() {
         let mut cfg = zeroclaw_config::schema::Config::default();
-        cfg.providers.fallback = Some("default".into());
-        cfg.providers.models.insert(
-            "default".into(),
-            zeroclaw_config::schema::ModelProviderConfig {
-                api_key: Some("sk-live-123".to_string()),
-                ..Default::default()
-            },
-        );
-        // Provider fields are now resolved directly — no cache needed.
+        cfg.providers.push(zeroclaw_config::schema::ProviderConfig {
+            name: "default".into(),
+            api_key: Some("sk-live-123".to_string()),
+            ..Default::default()
+        });
         cfg.reliability.api_keys = vec!["rk-1".to_string(), "rk-2".to_string()];
         cfg.gateway.paired_tokens = vec!["pair-token-1".to_string()];
         cfg.tunnel.cloudflare = Some(zeroclaw_config::schema::CloudflareTunnelConfig {
@@ -1743,13 +1672,7 @@ mod tests {
             default_subject: "ZeroClaw Message".to_string(),
             max_attachment_bytes: 25 * 1024 * 1024,
         });
-        cfg.providers.model_routes = vec![zeroclaw_config::schema::ModelRouteConfig {
-            hint: "reasoning".to_string(),
-            provider: "openrouter".to_string(),
-            model: "anthropic/claude-sonnet-4.6".to_string(),
-            api_key: Some("route-model-key".to_string()),
-        }];
-        cfg.providers.embedding_routes = vec![zeroclaw_config::schema::EmbeddingRouteConfig {
+        cfg.embedding_routes = vec![zeroclaw_config::schema::EmbeddingRouteConfig {
             hint: "semantic".to_string(),
             provider: "openai".to_string(),
             model: "text-embedding-3-small".to_string(),
@@ -1761,16 +1684,13 @@ mod tests {
         let masked = mask_sensitive_fields(&cfg);
         let toml = toml::to_string_pretty(&masked).expect("masked config should serialize");
         let parsed: zeroclaw_config::schema::Config =
-            toml::from_str::<zeroclaw_config::migration::V1Compat>(&toml)
-                .expect("masked config should remain valid TOML for Config")
-                .into_config();
+            toml::from_str(&toml).expect("masked config should remain valid TOML for Config");
 
         assert_eq!(
             parsed
                 .providers
-                .models
-                .get("default")
-                .and_then(|m| m.api_key.as_deref()),
+                .first()
+                .and_then(|p| p.api_key.as_deref()),
             Some(MASKED_SECRET)
         );
         assert_eq!(
@@ -1816,15 +1736,6 @@ mod tests {
         );
         assert_eq!(
             parsed
-                .providers
-                .model_routes
-                .first()
-                .and_then(|v| v.api_key.as_deref()),
-            Some(MASKED_SECRET)
-        );
-        assert_eq!(
-            parsed
-                .providers
                 .embedding_routes
                 .first()
                 .and_then(|v| v.api_key.as_deref()),
@@ -1843,14 +1754,18 @@ mod tests {
             workspace_dir: std::path::PathBuf::from("/tmp/current/workspace"),
             ..Default::default()
         };
-        current.providers.fallback = Some("default".into());
-        current.providers.models.insert(
-            "default".into(),
-            zeroclaw_config::schema::ModelProviderConfig {
-                api_key: Some("real-key".to_string()),
+        // Set up a default provider with api_key using new config
+        current.providers.push(zeroclaw_config::schema::ProviderConfig {
+            name: "default".into(),
+            api: "openai".into(),
+            api_key: Some("real-key".to_string()),
+            base_url: None,
+            model: vec![zeroclaw_config::schema::ModelConfig {
+                model_id: "gpt-4.1".into(),
                 ..Default::default()
-            },
-        );
+            }],
+        });
+        current.agent.default_model = Some("default/gpt-4.1".into());
         current.reliability.api_keys = vec!["r1".to_string(), "r2".to_string()];
         current.gateway.paired_tokens = vec!["pair-1".to_string(), "pair-2".to_string()];
         current.tunnel.cloudflare = Some(zeroclaw_config::schema::CloudflareTunnelConfig {
@@ -1896,21 +1811,7 @@ mod tests {
             default_subject: "ZeroClaw Message".to_string(),
             max_attachment_bytes: 25 * 1024 * 1024,
         });
-        current.providers.model_routes = vec![
-            zeroclaw_config::schema::ModelRouteConfig {
-                hint: "reasoning".to_string(),
-                provider: "openrouter".to_string(),
-                model: "anthropic/claude-sonnet-4.6".to_string(),
-                api_key: Some("route-model-key-1".to_string()),
-            },
-            zeroclaw_config::schema::ModelRouteConfig {
-                hint: "fast".to_string(),
-                provider: "openrouter".to_string(),
-                model: "openai/gpt-4.1-mini".to_string(),
-                api_key: Some("route-model-key-2".to_string()),
-            },
-        ];
-        current.providers.embedding_routes = vec![
+        current.embedding_routes = vec![
             zeroclaw_config::schema::EmbeddingRouteConfig {
                 hint: "semantic".to_string(),
                 provider: "openai".to_string(),
@@ -1928,9 +1829,8 @@ mod tests {
         ];
 
         let mut incoming = mask_sensitive_fields(&current);
-        if let Some(entry) = incoming.providers.fallback_provider_mut() {
-            entry.model = Some("gpt-4.1-mini".to_string());
-        }
+        // Simulate UI changing the model on the default provider
+        incoming.providers[0].model[0].model_id = "gpt-4.1-mini".to_string();
         // Simulate UI changing only one key and keeping the first masked.
         incoming.reliability.api_keys = vec![MASKED_SECRET.to_string(), "r2-new".to_string()];
         incoming.gateway.paired_tokens = vec![MASKED_SECRET.to_string(), "pair-2-new".to_string()];
@@ -1952,29 +1852,21 @@ mod tests {
         if let Some(email) = incoming.channels.email.as_mut() {
             email.password = MASKED_SECRET.to_string();
         }
-        incoming.providers.model_routes[1].api_key = Some("route-model-key-2-new".to_string());
-        incoming.providers.embedding_routes[1].api_key = Some("route-embed-key-2-new".to_string());
+        incoming.embedding_routes[1].api_key = Some("route-embed-key-2-new".to_string());
 
         let hydrated = hydrate_config_for_save(incoming, &current);
 
         assert_eq!(hydrated.config_path, current.config_path);
         assert_eq!(hydrated.workspace_dir, current.workspace_dir);
+        // Provider api_key should be restored from current (masked was unchanged)
         assert_eq!(
-            hydrated
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.clone()),
-            current
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.clone())
+            hydrated.providers[0].api_key.as_deref(),
+            Some("real-key")
         );
+        // Model should reflect the UI change
         assert_eq!(
-            hydrated
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref()),
-            Some("gpt-4.1-mini")
+            hydrated.providers[0].model[0].model_id.as_str(),
+            "gpt-4.1-mini"
         );
         assert_eq!(
             hydrated.reliability.api_keys,
@@ -2037,19 +1929,11 @@ mod tests {
             Some("feishu-verify-new")
         );
         assert_eq!(
-            hydrated.providers.model_routes[0].api_key.as_deref(),
-            Some("route-model-key-1")
-        );
-        assert_eq!(
-            hydrated.providers.model_routes[1].api_key.as_deref(),
-            Some("route-model-key-2-new")
-        );
-        assert_eq!(
-            hydrated.providers.embedding_routes[0].api_key.as_deref(),
+            hydrated.embedding_routes[0].api_key.as_deref(),
             Some("route-embed-key-1")
         );
         assert_eq!(
-            hydrated.providers.embedding_routes[1].api_key.as_deref(),
+            hydrated.embedding_routes[1].api_key.as_deref(),
             Some("route-embed-key-2-new")
         );
         assert_eq!(
@@ -2065,21 +1949,7 @@ mod tests {
     #[test]
     fn hydrate_config_for_save_restores_route_keys_by_identity_and_clears_unmatched_masks() {
         let mut current = zeroclaw_config::schema::Config::default();
-        current.providers.model_routes = vec![
-            zeroclaw_config::schema::ModelRouteConfig {
-                hint: "reasoning".to_string(),
-                provider: "openrouter".to_string(),
-                model: "anthropic/claude-sonnet-4.6".to_string(),
-                api_key: Some("route-model-key-1".to_string()),
-            },
-            zeroclaw_config::schema::ModelRouteConfig {
-                hint: "fast".to_string(),
-                provider: "openrouter".to_string(),
-                model: "openai/gpt-4.1-mini".to_string(),
-                api_key: Some("route-model-key-2".to_string()),
-            },
-        ];
-        current.providers.embedding_routes = vec![
+        current.embedding_routes = vec![
             zeroclaw_config::schema::EmbeddingRouteConfig {
                 hint: "semantic".to_string(),
                 provider: "openai".to_string(),
@@ -2097,19 +1967,8 @@ mod tests {
         ];
 
         let mut incoming = mask_sensitive_fields(&current);
-        incoming.providers.model_routes.swap(0, 1);
-        incoming.providers.embedding_routes.swap(0, 1);
+        incoming.embedding_routes.swap(0, 1);
         incoming
-            .providers
-            .model_routes
-            .push(zeroclaw_config::schema::ModelRouteConfig {
-                hint: "new".to_string(),
-                provider: "openai".to_string(),
-                model: "gpt-4.1".to_string(),
-                api_key: Some(MASKED_SECRET.to_string()),
-            });
-        incoming
-            .providers
             .embedding_routes
             .push(zeroclaw_config::schema::EmbeddingRouteConfig {
                 hint: "new-embed".to_string(),
@@ -2122,33 +1981,16 @@ mod tests {
         let hydrated = hydrate_config_for_save(incoming, &current);
 
         assert_eq!(
-            hydrated.providers.model_routes[0].api_key.as_deref(),
-            Some("route-model-key-2")
-        );
-        assert_eq!(
-            hydrated.providers.model_routes[1].api_key.as_deref(),
-            Some("route-model-key-1")
-        );
-        assert_eq!(hydrated.providers.model_routes[2].api_key, None);
-        assert_eq!(
-            hydrated.providers.embedding_routes[0].api_key.as_deref(),
+            hydrated.embedding_routes[0].api_key.as_deref(),
             Some("route-embed-key-2")
         );
         assert_eq!(
-            hydrated.providers.embedding_routes[1].api_key.as_deref(),
+            hydrated.embedding_routes[1].api_key.as_deref(),
             Some("route-embed-key-1")
         );
-        assert_eq!(hydrated.providers.embedding_routes[2].api_key, None);
+        assert_eq!(hydrated.embedding_routes[2].api_key, None);
         assert!(
             hydrated
-                .providers
-                .model_routes
-                .iter()
-                .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET))
-        );
-        assert!(
-            hydrated
-                .providers
                 .embedding_routes
                 .iter()
                 .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET))

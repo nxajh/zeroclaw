@@ -66,31 +66,8 @@ pub struct DelegateTool {
     /// Inherited multimodal handling config for sub-agent loops.
     multimodal_config: zeroclaw_config::schema::MultimodalConfig,
     /// Global delegate tool config providing default timeout values.
-    delegate_config: DelegateToolConfig,
-    /// Workspace directory inherited from the root agent context.
-    workspace_dir: PathBuf,
-    /// Cancellation token for cascade control of background tasks.
-    cancellation_token: CancellationToken,
-    /// Optional memory instance for namespace isolation on delegate agents.
-    memory: Option<Arc<dyn Memory>>,
-}
-
-impl DelegateTool {
-    pub fn new(
         agents: HashMap<String, DelegateAgentConfig>,
-        fallback_credential: Option<String>,
-        security: Arc<SecurityPolicy>,
-    ) -> Self {
-        Self::new_with_options(
-            agents,
-            fallback_credential,
-            security,
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
-        )
-    }
-
-    pub fn new_with_options(
-        agents: HashMap<String, DelegateAgentConfig>,
+        config: Arc<zeroclaw_config::schema::Config>,
         fallback_credential: Option<String>,
         security: Arc<SecurityPolicy>,
         provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions,
@@ -107,6 +84,7 @@ impl DelegateTool {
             workspace_dir: PathBuf::new(),
             cancellation_token: CancellationToken::new(),
             memory: None,
+            config,
         }
     }
 
@@ -118,6 +96,7 @@ impl DelegateTool {
         fallback_credential: Option<String>,
         security: Arc<SecurityPolicy>,
         depth: u32,
+        config: Arc<zeroclaw_config::schema::Config>,
     ) -> Self {
         Self::with_depth_and_options(
             agents,
@@ -125,15 +104,16 @@ impl DelegateTool {
             security,
             depth,
             zeroclaw_providers::ProviderRuntimeOptions::default(),
+            config,
         )
     }
-
     pub fn with_depth_and_options(
         agents: HashMap<String, DelegateAgentConfig>,
         fallback_credential: Option<String>,
         security: Arc<SecurityPolicy>,
         depth: u32,
         provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions,
+        config: Arc<zeroclaw_config::schema::Config>,
     ) -> Self {
         Self {
             agents: Arc::new(agents),
@@ -147,6 +127,7 @@ impl DelegateTool {
             workspace_dir: PathBuf::new(),
             cancellation_token: CancellationToken::new(),
             memory: None,
+            config,
         }
     }
 
@@ -434,18 +415,23 @@ impl DelegateTool {
             });
         }
 
-        // Create provider for this agent
-        let provider_credential_owned = agent_config
-            .api_key
-            .clone()
-            .or_else(|| self.fallback_credential.clone());
-        #[allow(clippy::option_as_ref_deref)]
-        let provider_credential = provider_credential_owned.as_ref().map(String::as_str);
+        // Resolve model route key and create provider
+        let resolved = match self.config.resolve_model(&agent_config.model) {
+            Some(r) => r,
+            None => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Cannot resolve model route key '{}' for agent '{agent_name}'",
+                        agent_config.model
+                    )),
+                });
+            }
+        };
 
-        let provider: Box<dyn Provider> = match zeroclaw_providers::create_provider_with_options(
-            &agent_config.provider,
-            provider_credential,
-            &self.provider_runtime_options,
+        let provider: Box<dyn Provider> = match zeroclaw_providers::create_provider_from_config(
+            &resolved.provider,
         ) {
             Ok(p) => p,
             Err(e) => {
@@ -454,7 +440,7 @@ impl DelegateTool {
                     output: String::new(),
                     error: Some(format!(
                         "Failed to create provider '{}' for agent '{agent_name}': {e}",
-                        agent_config.provider
+                        resolved.provider.name
                     )),
                 });
             }
@@ -478,6 +464,8 @@ impl DelegateTool {
                     &*provider,
                     &full_prompt,
                     temperature,
+                    &resolved.provider.name,
+                    &resolved.model.model_id,
                 )
                 .await;
         }
@@ -496,7 +484,7 @@ impl DelegateTool {
             provider.chat_with_system(
                 system_prompt_ref,
                 &full_prompt,
-                &agent_config.model,
+                &resolved.model.model_id,
                 temperature,
             ),
         )
@@ -526,8 +514,8 @@ impl DelegateTool {
                     success: true,
                     output: format!(
                         "[Agent '{agent_name}' ({provider}/{model})]\n{rendered}",
-                        provider = agent_config.provider,
-                        model = agent_config.model
+                        provider = provider_name,
+                        model = model_name
                     ),
                     error: None,
                 })
@@ -633,6 +621,7 @@ impl DelegateTool {
         let security = Arc::clone(&self.security);
         let fallback_credential = self.fallback_credential.clone();
         let provider_runtime_options = self.provider_runtime_options.clone();
+        let config = self.config.clone();
         let depth = self.depth;
         let parent_tools = Arc::clone(&self.parent_tools);
         let multimodal_config = self.multimodal_config.clone();
@@ -661,6 +650,7 @@ impl DelegateTool {
                 "agent": agent_name_owned,
                 "prompt": full_prompt,
             });
+                config: config.clone(),
 
             // Race the delegation against cancellation
             let outcome = tokio::select! {
@@ -790,6 +780,7 @@ impl DelegateTool {
             let security = Arc::clone(&self.security);
             let fallback_credential = self.fallback_credential.clone();
             let provider_runtime_options = self.provider_runtime_options.clone();
+        let config = self.config.clone();
             let depth = self.depth;
             let parent_tools = Arc::clone(&self.parent_tools);
             let multimodal_config = self.multimodal_config.clone();
@@ -813,6 +804,7 @@ impl DelegateTool {
                     workspace_dir,
                     cancellation_token,
                     memory: None,
+                    config,
                 };
                 let result = Box::pin(inner.execute_sync(&agent_name, &prompt, &args_clone)).await;
                 (agent_name, result)
@@ -1094,6 +1086,8 @@ impl DelegateTool {
         provider: &dyn Provider,
         full_prompt: &str,
         temperature: f64,
+        provider_name: &str,
+        model_name: &str,
     ) -> anyhow::Result<ToolResult> {
         if agent_config.allowed_tools.is_empty() {
             return Ok(ToolResult {
@@ -1155,8 +1149,8 @@ impl DelegateTool {
                 &mut history,
                 &sub_tools,
                 &noop_observer,
-                &agent_config.provider,
-                &agent_config.model,
+                &provider_name,
+                &model_name,
                 temperature,
                 true,
                 None,
@@ -1194,8 +1188,8 @@ impl DelegateTool {
                     success: true,
                     output: format!(
                         "[Agent '{agent_name}' ({provider}/{model}, agentic)]\n{rendered}",
-                        provider = agent_config.provider,
-                        model = agent_config.model
+                        provider = provider_name,
+                        model = model_name
                     ),
                     error: None,
                 })
@@ -1280,10 +1274,8 @@ mod tests {
         agents.insert(
             "researcher".to_string(),
             DelegateAgentConfig {
-                provider: "ollama".to_string(),
                 model: "llama3".to_string(),
                 system_prompt: Some("You are a research assistant.".to_string()),
-                api_key: None,
                 temperature: Some(0.3),
                 max_depth: 3,
                 agentic: false,
@@ -1298,10 +1290,8 @@ mod tests {
         agents.insert(
             "coder".to_string(),
             DelegateAgentConfig {
-                provider: "openrouter".to_string(),
                 model: "anthropic/claude-sonnet-4-20250514".to_string(),
                 system_prompt: None,
-                api_key: Some("delegate-test-credential".to_string()),
                 temperature: None,
                 max_depth: 2,
                 agentic: false,
@@ -1455,10 +1445,8 @@ mod tests {
 
     fn agentic_config(allowed_tools: Vec<String>, max_iterations: usize) -> DelegateAgentConfig {
         DelegateAgentConfig {
-            provider: "openrouter".to_string(),
             model: "model-test".to_string(),
             system_prompt: Some("You are agentic.".to_string()),
-            api_key: Some("delegate-test-credential".to_string()),
             temperature: Some(0.2),
             max_depth: 3,
             agentic: true,
@@ -1571,10 +1559,8 @@ mod tests {
         agents.insert(
             "broken".to_string(),
             DelegateAgentConfig {
-                provider: "totally-invalid-provider".to_string(),
                 model: "model".to_string(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -1685,10 +1671,8 @@ mod tests {
         agents.insert(
             "tester".to_string(),
             DelegateAgentConfig {
-                provider: "invalid-for-test".to_string(),
                 model: "test-model".to_string(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -1726,10 +1710,8 @@ mod tests {
         agents.insert(
             "tester".to_string(),
             DelegateAgentConfig {
-                provider: "invalid-for-test".to_string(),
                 model: "test-model".to_string(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2015,10 +1997,8 @@ mod tests {
     #[test]
     fn enriched_prompt_includes_tools_workspace_datetime() {
         let config = DelegateAgentConfig {
-            provider: "openrouter".to_string(),
             model: "test-model".to_string(),
             system_prompt: Some("You are a code reviewer.".to_string()),
-            api_key: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2069,10 +2049,8 @@ mod tests {
     #[test]
     fn enriched_prompt_includes_shell_policy_when_shell_present() {
         let config = DelegateAgentConfig {
-            provider: "openrouter".to_string(),
             model: "test-model".to_string(),
             system_prompt: None,
-            api_key: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2140,10 +2118,8 @@ mod tests {
     #[test]
     fn default_timeout_values_used_when_config_unset() {
         let config = DelegateAgentConfig {
-            provider: "ollama".to_string(),
             model: "llama3".to_string(),
             system_prompt: None,
-            api_key: None,
             temperature: None,
             max_depth: 3,
             agentic: false,
@@ -2169,10 +2145,8 @@ mod tests {
     #[test]
     fn enriched_prompt_omits_shell_policy_without_shell_tool() {
         let config = DelegateAgentConfig {
-            provider: "openrouter".to_string(),
             model: "test-model".to_string(),
             system_prompt: None,
-            api_key: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2203,10 +2177,8 @@ mod tests {
     #[test]
     fn custom_timeout_values_are_respected() {
         let config = DelegateAgentConfig {
-            provider: "ollama".to_string(),
             model: "llama3".to_string(),
             system_prompt: None,
-            api_key: None,
             temperature: None,
             max_depth: 3,
             agentic: false,
@@ -2259,10 +2231,8 @@ mod tests {
         config.agents.insert(
             "bad".into(),
             DelegateAgentConfig {
-                provider: "ollama".into(),
                 model: "llama3".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2287,10 +2257,8 @@ mod tests {
         config.agents.insert(
             "bad".into(),
             DelegateAgentConfig {
-                provider: "ollama".into(),
                 model: "llama3".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2315,10 +2283,8 @@ mod tests {
         config.agents.insert(
             "bad".into(),
             DelegateAgentConfig {
-                provider: "ollama".into(),
                 model: "llama3".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2343,10 +2309,8 @@ mod tests {
         config.agents.insert(
             "bad".into(),
             DelegateAgentConfig {
-                provider: "ollama".into(),
                 model: "llama3".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2371,10 +2335,8 @@ mod tests {
         config.agents.insert(
             "ok".into(),
             DelegateAgentConfig {
-                provider: "ollama".into(),
                 model: "llama3".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2395,10 +2357,8 @@ mod tests {
         config.agents.insert(
             "ok".into(),
             DelegateAgentConfig {
-                provider: "ollama".into(),
                 model: "llama3".into(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,
@@ -2428,10 +2388,8 @@ mod tests {
         .unwrap();
 
         let config = DelegateAgentConfig {
-            provider: "openrouter".to_string(),
             model: "test-model".to_string(),
             system_prompt: None,
-            api_key: None,
             temperature: None,
             max_depth: 3,
             agentic: true,
@@ -2475,10 +2433,8 @@ mod tests {
         .unwrap();
 
         let config = DelegateAgentConfig {
-            provider: "openrouter".to_string(),
             model: "test-model".to_string(),
             system_prompt: None,
-            api_key: None,
             temperature: None,
             max_depth: 3,
             agentic: true,

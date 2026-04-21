@@ -1,8 +1,27 @@
 use super::{IntegrationCategory, IntegrationEntry, IntegrationStatus};
+use zeroclaw_config::schema::Config;
 use zeroclaw_providers::{
     is_glm_alias, is_minimax_alias, is_moonshot_alias, is_qianfan_alias, is_qwen_alias,
     is_zai_alias,
 };
+
+fn active_if_provider(c: &Config, name: &str) -> IntegrationStatus {
+    if let Some(rm) = c.effective_model(None) {
+        if rm.provider.name == name {
+            return IntegrationStatus::Active;
+        }
+    }
+    IntegrationStatus::Available
+}
+
+fn active_if_providers(c: &Config, names: &[&str]) -> IntegrationStatus {
+    if let Some(rm) = c.effective_model(None) {
+        if names.contains(&rm.provider.name.as_str()) {
+            return IntegrationStatus::Active;
+        }
+    }
+    IntegrationStatus::Available
+}
 
 /// Returns the full catalog of integrations
 #[allow(clippy::too_many_lines)]
@@ -165,16 +184,14 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "200+ models, 1 API key",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("openrouter")
-                    && c.providers
-                        .fallback_provider()
-                        .and_then(|e| e.api_key.as_ref())
-                        .is_some()
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if rm.provider.name == "openrouter"
+                        && rm.provider.api_key.is_some()
+                    {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -182,11 +199,12 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "Claude 3.5/4 Sonnet & Opus",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("anthropic") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if rm.provider.name == "anthropic" {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -194,11 +212,12 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "GPT-4o, GPT-5, o1",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("openai") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if rm.provider.name == "openai" {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -206,15 +225,12 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "Gemini 2.5 Pro/Flash",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers
-                    .fallback_provider()
-                    .and_then(|e| e.model.as_deref())
-                    .is_some_and(|m| m.starts_with("google/"))
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if rm.provider.name == "google" {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -222,15 +238,12 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "DeepSeek V3 & R1",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers
-                    .fallback_provider()
-                    .and_then(|e| e.model.as_deref())
-                    .is_some_and(|m| m.starts_with("deepseek/"))
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if rm.provider.name == "deepseek" {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -238,15 +251,12 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "Grok 3 & 4",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers
-                    .fallback_provider()
-                    .and_then(|e| e.model.as_deref())
-                    .is_some_and(|m| m.starts_with("x-ai/"))
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if rm.provider.name == "x-ai" {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -254,166 +264,98 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "Mistral Large & Codestral",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers
-                    .fallback_provider()
-                    .and_then(|e| e.model.as_deref())
-                    .is_some_and(|m| m.starts_with("mistral"))
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if rm.provider.name == "mistral" {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
             name: "Ollama",
             description: "Local models (Llama, etc.)",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("ollama") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "ollama"),
         },
         IntegrationEntry {
             name: "Perplexity",
             description: "Search-augmented AI",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("perplexity") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "perplexity"),
         },
         IntegrationEntry {
             name: "Hugging Face",
             description: "Open-source models",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if matches!(c.providers.fallback.as_deref(), Some("huggingface" | "hf")) {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_providers(c, &["huggingface", "hf"]),
         },
         IntegrationEntry {
             name: "LM Studio",
             description: "Local model server",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if matches!(
-                    c.providers.fallback.as_deref(),
-                    Some("lmstudio" | "lm-studio")
-                ) {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_providers(c, &["lmstudio", "lm-studio"]),
         },
         IntegrationEntry {
             name: "Venice",
             description: "Privacy-first inference (Llama, Opus)",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("venice") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "venice"),
         },
         IntegrationEntry {
             name: "Vercel AI",
             description: "Vercel AI Gateway",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("vercel") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "vercel"),
         },
         IntegrationEntry {
             name: "Cloudflare AI",
             description: "Cloudflare AI Gateway",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("cloudflare") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "cloudflare"),
         },
         IntegrationEntry {
             name: "Moonshot",
             description: "Kimi & Kimi Coding",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers
-                    .fallback
-                    .as_deref()
-                    .is_some_and(is_moonshot_alias)
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if is_moonshot_alias(&rm.provider.name) {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
             name: "Synthetic",
             description: "Synthetic AI models",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("synthetic") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "synthetic"),
         },
         IntegrationEntry {
             name: "OpenCode Zen",
             description: "Code-focused AI models",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("opencode") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "opencode"),
         },
         IntegrationEntry {
             name: "OpenCode Go",
             description: "Subsidized Code-focused AI models",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("opencode-go") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "opencode-go"),
         },
         IntegrationEntry {
             name: "Z.AI",
             description: "Z.AI inference",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers.fallback.as_deref().is_some_and(is_zai_alias) {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if is_zai_alias(&rm.provider.name) {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -421,11 +363,12 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "ChatGLM / Zhipu models",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers.fallback.as_deref().is_some_and(is_glm_alias) {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if is_glm_alias(&rm.provider.name) {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -433,15 +376,12 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "MiniMax AI models",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers
-                    .fallback
-                    .as_deref()
-                    .is_some_and(is_minimax_alias)
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if is_minimax_alias(&rm.provider.name) {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
@@ -449,100 +389,62 @@ pub fn all_integrations() -> Vec<IntegrationEntry> {
             description: "Alibaba DashScope Qwen models",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers.fallback.as_deref().is_some_and(is_qwen_alias) {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if is_qwen_alias(&rm.provider.name) {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
             name: "Amazon Bedrock",
             description: "AWS managed model access",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("bedrock") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "bedrock"),
         },
         IntegrationEntry {
             name: "Qianfan",
             description: "Baidu AI models",
             category: IntegrationCategory::AiModel,
             status_fn: |c| {
-                if c.providers
-                    .fallback
-                    .as_deref()
-                    .is_some_and(is_qianfan_alias)
-                {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
+                if let Some(rm) = c.effective_model(None) {
+                    if is_qianfan_alias(&rm.provider.name) {
+                        return IntegrationStatus::Active;
+                    }
                 }
+                IntegrationStatus::Available
             },
         },
         IntegrationEntry {
             name: "Groq",
             description: "Ultra-fast LPU inference",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("groq") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "groq"),
         },
         IntegrationEntry {
             name: "Together AI",
             description: "Open-source model hosting",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("together") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "together"),
         },
         IntegrationEntry {
             name: "Fireworks AI",
             description: "Fast open-source inference",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("fireworks") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "fireworks"),
         },
         IntegrationEntry {
             name: "Novita AI",
             description: "Affordable open-source inference",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("novita") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "novita"),
         },
         IntegrationEntry {
             name: "Cohere",
             description: "Command R+ & embeddings",
             category: IntegrationCategory::AiModel,
-            status_fn: |c| {
-                if c.providers.fallback.as_deref() == Some("cohere") {
-                    IntegrationStatus::Active
-                } else {
-                    IntegrationStatus::Available
-                }
-            },
+            status_fn: |c| active_if_provider(c, "cohere"),
         },
         // ── Productivity ────────────────────────────────────────
         IntegrationEntry {
@@ -1089,43 +991,59 @@ mod tests {
     fn regional_provider_aliases_activate_expected_ai_integrations() {
         let entries = all_integrations();
         let mut config = Config::default();
-        config.providers.fallback = Some("minimax-cn".to_string());
 
+        // Helper to set default model with a single provider
+        let mut set_provider = |name: &str| {
+            config.providers.clear();
+            config.providers.push(zeroclaw_config::schema::ProviderConfig {
+                name: name.to_string(),
+                api: "openai".to_string(),
+                api_key: None,
+                base_url: None,
+                model: vec![zeroclaw_config::schema::ModelConfig {
+                    model_id: "test".to_string(),
+                    ..Default::default()
+                }],
+            });
+            config.agent.default_model = Some(format!("{}/test", name));
+        };
+
+        set_provider("minimax-cn");
         let minimax = entries.iter().find(|e| e.name == "MiniMax").unwrap();
         assert!(matches!(
             (minimax.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        config.providers.fallback = Some("glm-cn".to_string());
+        set_provider("glm-cn");
         let glm = entries.iter().find(|e| e.name == "GLM").unwrap();
         assert!(matches!(
             (glm.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        config.providers.fallback = Some("moonshot-intl".to_string());
+        set_provider("moonshot-intl");
         let moonshot = entries.iter().find(|e| e.name == "Moonshot").unwrap();
         assert!(matches!(
             (moonshot.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        config.providers.fallback = Some("qwen-intl".to_string());
+        set_provider("qwen-intl");
         let qwen = entries.iter().find(|e| e.name == "Qwen").unwrap();
         assert!(matches!(
             (qwen.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        config.providers.fallback = Some("zai-cn".to_string());
+        set_provider("zai-cn");
         let zai = entries.iter().find(|e| e.name == "Z.AI").unwrap();
         assert!(matches!(
             (zai.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        config.providers.fallback = Some("baidu".to_string());
+        set_provider("baidu");
         let qianfan = entries.iter().find(|e| e.name == "Qianfan").unwrap();
         assert!(matches!(
             (qianfan.status_fn)(&config),

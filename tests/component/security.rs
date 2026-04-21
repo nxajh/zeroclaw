@@ -144,15 +144,18 @@ fn security_full_autonomy_parses() {
 /// Config does not expose raw API keys in Debug output.
 #[test]
 fn security_config_debug_does_not_leak_api_key() {
+    use zeroclaw::config::{ProviderConfig, ModelConfig};
     let mut config = Config::default();
-    config.providers.fallback = Some("test".into());
-    config.providers.models.insert(
-        "test".into(),
-        zeroclaw::config::ModelProviderConfig {
-            api_key: Some("sk-1234567890abcdef".to_string()),
+    config.providers.push(ProviderConfig {
+        name: "test".into(),
+        api: "openai".into(),
+        api_key: Some("sk-1234567890abcdef".to_string()),
+        model: vec![ModelConfig {
+            model_id: "test-model".into(),
             ..Default::default()
-        },
-    );
+        }],
+        ..Default::default()
+    });
 
     let debug_output = format!("{:?}", config);
 

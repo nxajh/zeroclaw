@@ -392,14 +392,12 @@ pub fn all_tools_with_runtime(
     // LLM task tool — always registered when a provider is configured
     {
         let llm_task_provider = root_config
-            .providers
-            .fallback
-            .clone()
+            .effective_model(None)
+            .map(|r| r.provider.name.clone())
             .unwrap_or_else(|| "openrouter".to_string());
         let llm_task_model = root_config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.model.clone())
+            .effective_model(None)
+            .map(|r| r.model.model_id.clone())
             .unwrap_or_else(|| "openai/gpt-4o-mini".to_string());
         let llm_task_runtime_options =
             zeroclaw_providers::provider_runtime_options_from_config(root_config);
@@ -407,15 +405,10 @@ pub fn all_tools_with_runtime(
             security.clone(),
             llm_task_provider,
             llm_task_model,
+            0.7,  // temperature is now a runtime parameter
             root_config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.temperature)
-                .unwrap_or(0.7),
-            root_config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.api_key.clone()),
+                .effective_model(None)
+                .and_then(|r| r.provider.api_key.clone()),
             llm_task_runtime_options,
         )));
     }
@@ -852,6 +845,7 @@ pub fn all_tools_with_runtime(
             delegate_fallback_credential.clone(),
             security.clone(),
             provider_runtime_options.clone(),
+            Arc::new(root_config.clone()),
         )
         .with_parent_tools(Arc::clone(&parent_tools))
         .with_multimodal_config(root_config.multimodal.clone())
@@ -874,6 +868,7 @@ pub fn all_tools_with_runtime(
             delegate_fallback_credential,
             security.clone(),
             provider_runtime_options,
+            Arc::new(root_config.clone()),
         )));
     }
 

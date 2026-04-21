@@ -278,9 +278,9 @@ async fn run_agent_job(
         &config.memory,
         &config.workspace_dir,
         config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref()),
+            .effective_model(None)
+            .and_then(|r| r.provider.api_key.clone())
+            .as_deref(),
     ) {
         Ok(mem) => match mem.recall(&prompt, 5, None, None, None).await {
             Ok(entries) if !entries.is_empty() => {
@@ -319,11 +319,7 @@ async fn run_agent_job(
                 Some(prefixed_prompt),
                 None,
                 model_override,
-                config
-                    .providers
-                    .fallback_provider()
-                    .and_then(|e| e.temperature)
-                    .unwrap_or(0.7),
+                0.7,  // temperature is now a runtime parameter
                 vec![],
                 false,
                 None,

@@ -1,5 +1,4 @@
 pub use zeroclaw_config::migration;
-pub use zeroclaw_config::providers;
 pub mod schema;
 pub mod traits;
 pub mod workspace;
@@ -37,7 +36,6 @@ pub use schema::{
     set_runtime_proxy_config, ws_connect_with_proxy,
 };
 
-pub use schema::ModelProviderConfig;
 pub use traits::HasPropKind;
 pub use traits::PropFieldInfo;
 pub use traits::PropKind;
@@ -204,7 +202,7 @@ mod tests {
         let config = Config::default();
 
         // Config::default() no longer has provider cache fields; just verify providers is constructible
-        assert!(config.providers.fallback.is_none() || config.providers.fallback.is_some());
+        assert!(config.providers_legacy.fallback.is_none() || config.providers_legacy.fallback.is_some());
     }
 
     #[test]

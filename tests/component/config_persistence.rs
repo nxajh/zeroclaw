@@ -3,54 +3,31 @@
 //! Prevents: Pattern 2 — Config persistence & workspace discovery bugs (13% of user bugs).
 //! Issues: #547, #417, #621, #802
 //!
-//! Tests Config::load_or_init() with isolated temp directories, env var overrides,
-//! and config file round-trips to verify workspace discovery and persistence.
+//! Tests Config round-trips with v3 provider configuration.
 
 use std::fs;
-use zeroclaw::config::{AgentConfig, Config, MemoryConfig};
+use zeroclaw::config::{AgentConfig, Config, MemoryConfig, ProviderConfig, ModelConfig};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Config default construction
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn config_default_has_expected_provider() {
+fn config_default_has_empty_providers() {
     let config = Config::default();
-    // Default config has no provider until configured
     assert!(
-        config.providers.fallback.is_none() || config.providers.fallback.is_some(),
-        "default config should be constructible"
+        config.providers.is_empty(),
+        "default config should have no providers"
     );
 }
 
 #[test]
-fn config_default_has_expected_model() {
+fn config_default_has_no_default_model() {
     let config = Config::default();
-    // Default config has no model until configured
     assert!(
-        config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.model.as_deref())
-            .is_none()
-            || config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.model.as_deref())
-                .is_some(),
-        "default config should be constructible"
+        config.agent.default_model.is_none(),
+        "default config should have no default_model"
     );
-}
-
-#[test]
-fn config_default_temperature_positive() {
-    let config = Config::default();
-    let temp = config
-        .providers
-        .fallback_provider()
-        .and_then(|e| e.temperature)
-        .unwrap_or(0.7);
-    assert!(temp > 0.0, "default temperature should be positive");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,46 +104,29 @@ fn memory_config_default_vector_keyword_weights_sum_to_one() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Config TOML serialization round-trip
+// Config TOML serialization round-trip (v3 providers)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
 fn config_toml_roundtrip_preserves_provider() {
-    use zeroclaw::config::ModelProviderConfig;
     let mut config = Config::default();
-    config.providers.fallback = Some("deepseek".into());
-    config.providers.models.insert(
-        "deepseek".into(),
-        ModelProviderConfig {
-            model: Some("deepseek-chat".into()),
-            temperature: Some(0.5),
+    config.providers.push(ProviderConfig {
+        name: "deepseek".into(),
+        api: "openai".into(),
+        api_key: Some("sk-test".into()),
+        model: vec![ModelConfig {
+            model_id: "deepseek-chat".into(),
             ..Default::default()
-        },
-    );
+        }],
+        ..Default::default()
+    });
 
     let toml_str = toml::to_string(&config).expect("config should serialize to TOML");
-    let compat: zeroclaw::config::migration::V1Compat =
-        toml::from_str(&toml_str).expect("TOML should deserialize back");
-    let parsed = compat.into_config();
+    let parsed: Config = toml::from_str(&toml_str).expect("TOML should deserialize back");
 
-    assert_eq!(parsed.providers.fallback.as_deref(), Some("deepseek"));
-    assert_eq!(
-        parsed
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.model.as_deref()),
-        Some("deepseek-chat")
-    );
-    assert!(
-        (parsed
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.temperature)
-            .unwrap_or(0.7)
-            - 0.5)
-            .abs()
-            < f64::EPSILON
-    );
+    assert_eq!(parsed.providers.len(), 1);
+    assert_eq!(parsed.providers[0].name, "deepseek");
+    assert_eq!(parsed.providers[0].model[0].model_id, "deepseek-chat");
 }
 
 #[test]
@@ -207,37 +167,30 @@ fn config_toml_roundtrip_preserves_memory_config() {
 
 #[test]
 fn config_file_write_read_roundtrip() {
-    use zeroclaw::config::ModelProviderConfig;
     let tmp = tempfile::TempDir::new().expect("tempdir creation should succeed");
     let config_path = tmp.path().join("config.toml");
 
     let mut config = Config::default();
-    config.providers.fallback = Some("mistral".into());
-    config.providers.models.insert(
-        "mistral".into(),
-        ModelProviderConfig {
-            model: Some("mistral-large".into()),
+    config.providers.push(ProviderConfig {
+        name: "mistral".into(),
+        api: "openai".into(),
+        model: vec![ModelConfig {
+            model_id: "mistral-large".into(),
             ..Default::default()
-        },
-    );
+        }],
+        ..Default::default()
+    });
     config.agent.max_tool_iterations = 15;
 
     let toml_str = toml::to_string(&config).expect("config should serialize");
     fs::write(&config_path, &toml_str).expect("config file write should succeed");
 
     let read_back = fs::read_to_string(&config_path).expect("config file read should succeed");
-    let compat: zeroclaw::config::migration::V1Compat =
-        toml::from_str(&read_back).expect("TOML should parse back");
-    let parsed = compat.into_config();
+    let parsed: Config = toml::from_str(&read_back).expect("TOML should parse back");
 
-    assert_eq!(parsed.providers.fallback.as_deref(), Some("mistral"));
-    assert_eq!(
-        parsed
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.model.as_deref()),
-        Some("mistral-large")
-    );
+    assert_eq!(parsed.providers.len(), 1);
+    assert_eq!(parsed.providers[0].name, "mistral");
+    assert_eq!(parsed.providers[0].model[0].model_id, "mistral-large");
     assert_eq!(parsed.agent.max_tool_iterations, 15);
 }
 

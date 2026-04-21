@@ -482,9 +482,9 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 &config.memory,
                 &config.workspace_dir,
                 config
-                    .providers
-                    .fallback_provider()
-                    .and_then(|e| e.api_key.as_deref()),
+                    .effective_model(None)
+                    .and_then(|r| r.provider.api_key.clone())
+                    .as_deref(),
             )
             .ok();
 
@@ -528,11 +528,7 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 (None, Some(mc)) => format!("{mc}\n\n{task_prompt}"),
                 (None, None) => task_prompt,
             };
-            let temp = config
-                .providers
-                .fallback_provider()
-                .and_then(|e| e.temperature)
-                .unwrap_or(0.7);
+            let temp = 0.7;  // temperature is now a runtime parameter
             let phase2_fut = Box::pin(crate::agent::run(
                 config.clone(),
                 Some(prompt),

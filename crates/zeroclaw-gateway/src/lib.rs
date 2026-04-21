@@ -421,25 +421,23 @@ pub async fn run_gateway(
     let actual_port = listener.local_addr()?.port();
     let display_addr = format!("{host}:{actual_port}");
 
-    let fallback = config.providers.fallback_provider();
+    let resolved = config.effective_model(None);
     let provider: Arc<dyn Provider> =
-        Arc::from(zeroclaw_providers::create_resilient_provider_with_options(
-            config.providers.fallback.as_deref().unwrap_or("openrouter"),
-            fallback.and_then(|e| e.api_key.as_deref()),
-            fallback.and_then(|e| e.base_url.as_deref()),
-            &config.reliability,
-            &zeroclaw_providers::provider_runtime_options_from_config(&config),
+        Arc::from(zeroclaw_providers::create_provider_from_config(
+            resolved.as_ref()
+                .map(|r| &r.provider)
+                .ok_or_else(|| anyhow::anyhow!("No provider configured"))?,
         )?);
-    let model = fallback
-        .and_then(|e| e.model.clone())
+    let model = resolved
+        .as_ref()
+        .map(|r| r.model.model_id.clone())
         .unwrap_or_else(|| "anthropic/claude-sonnet-4".into());
-    let temperature = fallback.and_then(|e| e.temperature).unwrap_or(0.7);
     let mem: Arc<dyn Memory> = Arc::from(zeroclaw_memory::create_memory_with_storage_and_routes(
         &config.memory,
-        &config.providers.embedding_routes,
+        &config.embedding_routes,
         Some(&config.storage.provider.config),
         &config.workspace_dir,
-        fallback.and_then(|e| e.api_key.as_deref()),
+        resolved.as_ref().and_then(|r| r.provider.api_key.as_deref()),
     )?);
     let runtime: Arc<dyn platform::RuntimeAdapter> =
         Arc::from(platform::create_runtime(&config.runtime)?);
@@ -479,9 +477,9 @@ pub async fn run_gateway(
         &config.workspace_dir,
         &config.agents,
         config
-            .providers
-            .fallback_provider()
-            .and_then(|e| e.api_key.as_deref()),
+            .effective_model(None)
+            .and_then(|r| r.provider.api_key.clone())
+            .as_deref(),
         &config,
         Some(canvas_store.clone()),
     );
@@ -874,7 +872,7 @@ pub async fn run_gateway(
         config: config_state,
         provider,
         model,
-        temperature,
+        temperature: 0.7,
         mem,
         auto_save: config.memory.auto_save,
         webhook_secret_hash,
@@ -1491,9 +1489,8 @@ async fn handle_webhook(
     let provider_label = state
         .config
         .lock()
-        .providers
-        .fallback
-        .clone()
+        .effective_model(None)
+        .map(|r| r.provider.name.clone())
         .unwrap_or_else(|| "unknown".to_string());
     let model_label = state.model.clone();
     let started_at = Instant::now();

@@ -18,8 +18,6 @@ pub struct SwarmTool {
     swarms: Arc<HashMap<String, SwarmConfig>>,
     agents: Arc<HashMap<String, DelegateAgentConfig>>,
     security: Arc<SecurityPolicy>,
-    fallback_credential: Option<String>,
-    provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions,
     config: Arc<zeroclaw_config::schema::Config>,
 }
 
@@ -27,17 +25,13 @@ impl SwarmTool {
     pub fn new(
         swarms: HashMap<String, SwarmConfig>,
         agents: HashMap<String, DelegateAgentConfig>,
-        fallback_credential: Option<String>,
         security: Arc<SecurityPolicy>,
-        provider_runtime_options: zeroclaw_providers::ProviderRuntimeOptions,
         config: Arc<zeroclaw_config::schema::Config>,
     ) -> Self {
         Self {
             swarms: Arc::new(swarms),
             agents: Arc::new(agents),
             security,
-            fallback_credential,
-            provider_runtime_options,
             config,
         }
     }
@@ -645,9 +639,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         assert_eq!(tool.name(), "swarm");
         let schema = tool.parameters_schema();
@@ -665,9 +657,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         assert!(!tool.description().is_empty());
     }
@@ -677,9 +667,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let schema = tool.parameters_schema();
         let desc = schema["properties"]["swarm"]["description"]
@@ -693,9 +681,7 @@ mod tests {
         let tool = SwarmTool::new(
             HashMap::new(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let schema = tool.parameters_schema();
         let desc = schema["properties"]["swarm"]["description"]
@@ -709,9 +695,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "nonexistent", "prompt": "test"}))
@@ -726,9 +710,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool.execute(json!({"prompt": "test"})).await;
         assert!(result.is_err());
@@ -739,9 +721,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool.execute(json!({"swarm": "pipeline"})).await;
         assert!(result.is_err());
@@ -752,9 +732,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "  ", "prompt": "test"}))
@@ -769,9 +747,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "pipeline", "prompt": "  "}))
@@ -797,9 +773,7 @@ mod tests {
         let tool = SwarmTool::new(
             swarms,
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "broken", "prompt": "test"}))
@@ -825,9 +799,7 @@ mod tests {
         let tool = SwarmTool::new(
             swarms,
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "empty", "prompt": "test"}))
@@ -846,9 +818,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             readonly,
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "pipeline", "prompt": "test"}))
@@ -873,9 +843,7 @@ mod tests {
         let tool = SwarmTool::new(
             sample_swarms(),
             sample_agents(),
-            None,
             limited,
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "pipeline", "prompt": "test"}))
@@ -908,9 +876,7 @@ mod tests {
         let tool = SwarmTool::new(
             swarms,
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "seq", "prompt": "test"}))
@@ -936,9 +902,7 @@ mod tests {
         let tool = SwarmTool::new(
             swarms,
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "par", "prompt": "test"}))
@@ -964,9 +928,7 @@ mod tests {
         let tool = SwarmTool::new(
             swarms,
             sample_agents(),
-            None,
             test_security(),
-            zeroclaw_providers::ProviderRuntimeOptions::default(),
         );
         let result = tool
             .execute(json!({"swarm": "rout", "prompt": "test"}))

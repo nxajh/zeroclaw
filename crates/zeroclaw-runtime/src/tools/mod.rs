@@ -865,9 +865,7 @@ pub fn all_tools_with_runtime(
         tool_arcs.push(Arc::new(SwarmTool::new(
             root_config.swarms.clone(),
             swarm_agents,
-            delegate_fallback_credential,
             security.clone(),
-            provider_runtime_options,
             Arc::new(root_config.clone()),
         )));
     }

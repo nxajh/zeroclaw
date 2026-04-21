@@ -261,10 +261,6 @@ impl ModelRoutingConfigTool {
                 json!({
                     "model": agent.model,
                     "system_prompt": agent.system_prompt,
-                    "api_key_configured": agent
-                        .api_key
-                        .as_ref()
-                        .is_some_and(|value| !value.trim().is_empty()),
                     "temperature": agent.temperature,
                     "max_depth": agent.max_depth,
                     "agentic": agent.agentic,
@@ -627,7 +623,6 @@ impl ModelRoutingConfigTool {
         };
 
         let system_prompt_update = Self::parse_optional_string_update(args, "system_prompt")?;
-        let api_key_update = Self::parse_optional_string_update(args, "api_key")?;
         let temperature_update = Self::parse_optional_f64_update(args, "temperature")?;
         let max_depth_update = Self::parse_optional_u32_update(args, "max_depth")?;
         let max_iterations_update = Self::parse_optional_usize_update(args, "max_iterations")?;
@@ -664,12 +659,6 @@ impl ModelRoutingConfigTool {
         match system_prompt_update {
             MaybeSet::Set(value) => next_agent.system_prompt = Some(value),
             MaybeSet::Null => next_agent.system_prompt = None,
-            MaybeSet::Unset => {}
-        }
-
-        match api_key_update {
-            MaybeSet::Set(value) => next_agent.api_key = Some(value),
-            MaybeSet::Null => next_agent.api_key = None,
             MaybeSet::Unset => {}
         }
 

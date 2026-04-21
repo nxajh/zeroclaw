@@ -231,6 +231,7 @@ impl SwarmTool {
             let prompt_clone = full_prompt.clone();
             let timeout = swarm_config.timeout_secs;
             let model = resolved_rr.model.model_id.clone();
+            let provider_name = resolved_rr.provider.name.clone();
             let temperature = agent_config.temperature.unwrap_or(0.7);
             let system_prompt = agent_config.system_prompt.clone();
 
@@ -347,12 +348,16 @@ impl SwarmTool {
             agent_descriptions.join("\n")
         );
 
+        let router_model = self.config.resolve_model(&first_agent_config.model)
+            .map(|r| r.model.model_id.clone())
+            .unwrap_or_else(|| first_agent_config.model.clone());
+
         let chosen = tokio::time::timeout(
             Duration::from_secs(SWARM_AGENT_TIMEOUT_SECS),
             router_provider.chat_with_system(
                 Some("You are a routing assistant. Respond with only the agent name."),
                 &routing_prompt,
-                &self.config.resolve_model(&first_agent_config.model).map(|r| r.model.model_id.as_str()).unwrap_or(&first_agent_config.model),
+                &router_model,
                 0.0,
             ),
         )

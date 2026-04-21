@@ -9740,6 +9740,7 @@ pub fn parse_extra_headers_env(raw: &str) -> Vec<(String, String)> {
     result
 }
 
+#[allow(dead_code)]
 fn normalize_wire_api(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "responses" | "openai-responses" | "open-ai-responses" => Some("responses"),
@@ -9753,6 +9754,7 @@ fn normalize_wire_api(raw: &str) -> Option<&'static str> {
     }
 }
 
+#[allow(dead_code)]
 fn read_codex_openai_api_key() -> Option<String> {
     let home = UserDirs::new()?.home_dir().to_path_buf();
     let auth_path = home.join(".codex").join("auth.json");

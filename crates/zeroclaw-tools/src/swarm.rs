@@ -66,6 +66,7 @@ impl SwarmTool {
         })
     }
 
+    async fn call_agent(
         &self,
         agent_name: &str,
         agent_config: &DelegateAgentConfig,
@@ -77,6 +78,7 @@ impl SwarmTool {
             .map_err(|r| r.error.unwrap_or_default())?;
 
         let temperature = agent_config.temperature.unwrap_or(0.7);
+        let model_id = agent_config.model.split('/').last().unwrap_or(&agent_config.model);
 
         let result = tokio::time::timeout(
             Duration::from_secs(timeout_secs),

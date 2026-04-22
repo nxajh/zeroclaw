@@ -512,7 +512,7 @@ impl Default for WorkspaceConfig {
 }
 
 /// Named provider profile definition.
-// ── New Provider/Model Configuration (v3) ────────────────────────
+// ── New Provider/Model Configuration ────────────────────────
 
 /// Model cost configuration (`[[providers.model.cost]]`).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -10582,7 +10582,7 @@ impl Config {
         Ok(())
     }
 
-    // ── New Provider/Model Resolution Methods (v3) ─────────────────
+    // ── New Provider/Model Resolution Methods ─────────────────
 
     /// Resolve a route key `"provider_name/model_id"` to a concrete provider + model.
     ///
@@ -10606,26 +10606,26 @@ impl Config {
         self.resolve_model(key)
     }
 
-    /// List all configured providers (v3).
-    pub fn list_providers_v3(&self) -> &[ProviderConfig] {
+    /// List all configured providers 
+    pub fn list_providers(&self) -> &[ProviderConfig] {
         &self.providers
     }
 
-    /// Find a provider by name (v3).
-    pub fn find_provider_v3(&self, name: &str) -> Option<&ProviderConfig> {
+    /// Find a provider by name 
+    pub fn find_provider(&self, name: &str) -> Option<&ProviderConfig> {
         self.providers.iter().find(|p| p.name == name)
     }
 
-    /// Find a specific model under a provider (v3).
-    pub fn find_model_v3(&self, provider_name: &str, model_id: &str) -> Option<&ModelConfig> {
-        self.find_provider_v3(provider_name)?
+    /// Find a specific model under a provider 
+    pub fn find_model(&self, provider_name: &str, model_id: &str) -> Option<&ModelConfig> {
+        self.find_provider(provider_name)?
             .model
             .iter()
             .find(|m| m.model_id == model_id)
     }
 
-    /// Add or update a provider (v3). Used by wizard and onboarding.
-    pub fn upsert_provider_v3(&mut self, provider: ProviderConfig) {
+    /// Add or update a provider Used by wizard and onboarding.
+    pub fn upsert_provider(&mut self, provider: ProviderConfig) {
         if let Some(existing) = self.providers.iter_mut().find(|p| p.name == provider.name) {
             *existing = provider;
         } else {
@@ -10633,10 +10633,10 @@ impl Config {
         }
     }
 
-    /// Ensure a default provider exists (v3). Returns a mutable reference to the
+    /// Ensure a default provider exists Returns a mutable reference to the
     /// provider named "default", creating one if absent. This replaces the legacy
     /// `ensure_fallback_provider()` which operated on `ProvidersConfig`.
-    pub fn ensure_default_provider_v3(&mut self) -> &mut ProviderConfig {
+    pub fn ensure_default_provider(&mut self) -> &mut ProviderConfig {
         let name = self
             .agent
             .default_model
@@ -10653,22 +10653,22 @@ impl Config {
         self.providers.iter_mut().find(|p| p.name == name).unwrap()
     }
 
-    /// Set the default model route key (v3). Used by model_switch.
+    /// Set the default model route key Used by model_switch.
     pub fn set_default_model(&mut self, key: &str) {
         self.agent.default_model = Some(key.to_string());
     }
 
-    /// Set a model route alias (v3). Used by model_routing_config.
+    /// Set a model route alias Used by model_routing_config.
     pub fn set_route(&mut self, hint: &str, key: &str) {
         self.model_routes.insert(hint.to_string(), key.to_string());
     }
 
-    /// Remove a provider by name (v3).
-    pub fn remove_provider_v3(&mut self, name: &str) {
+    /// Remove a provider by name 
+    pub fn remove_provider(&mut self, name: &str) {
         self.providers.retain(|p| p.name != name);
     }
 
-    /// Remove a route alias (v3).
+    /// Remove a route alias 
     pub fn remove_route(&mut self, hint: &str) {
         self.model_routes.remove(hint);
     }
@@ -10699,14 +10699,14 @@ impl Config {
         if let Ok(key) = std::env::var("ZEROCLAW_API_KEY").or_else(|_| std::env::var("API_KEY"))
             && !key.is_empty()
         {
-            self.ensure_default_provider_v3().api_key = Some(key);
+            self.ensure_default_provider().api_key = Some(key);
         }
         // API Key: GLM_API_KEY overrides when provider is a GLM/Zhipu variant.
         if default_provider_name.as_deref().is_some_and(is_glm_alias)
             && let Ok(key) = std::env::var("GLM_API_KEY")
             && !key.is_empty()
         {
-            self.ensure_default_provider_v3().api_key = Some(key);
+            self.ensure_default_provider().api_key = Some(key);
         }
 
         // API Key: ZAI_API_KEY overrides when provider is a Z.AI variant.
@@ -10714,7 +10714,7 @@ impl Config {
             && let Ok(key) = std::env::var("ZAI_API_KEY")
             && !key.is_empty()
         {
-            self.ensure_default_provider_v3().api_key = Some(key);
+            self.ensure_default_provider().api_key = Some(key);
         }
 
         // Provider override precedence:
@@ -10756,7 +10756,7 @@ impl Config {
                 format!("{provider_name}/{model_id}")
             };
             // Ensure the provider entry exists, then update the default route.
-            self.ensure_default_provider_v3().name = provider_name.clone();
+            self.ensure_default_provider().name = provider_name.clone();
             self.agent.default_model = Some(new_key);
         }
 

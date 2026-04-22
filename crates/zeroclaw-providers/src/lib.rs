@@ -1863,7 +1863,7 @@ pub fn create_resilient_provider_with_options(
 }
 
 /// Create a routed provider using the new v3 config format (HashMap hint -> "provider/model").
-pub fn create_routed_provider_with_options_v3(
+pub fn create_routed_provider_with_options(
     primary_name: &str,
     api_key: Option<&str>,
     api_url: Option<&str>,

@@ -754,7 +754,7 @@ fn apply_tui_selections_to_config(app: &App, config: &mut Config) {
             ..Default::default()
         });
     }
-    config.upsert_provider_v3(provider_config);
+    config.upsert_provider(provider_config);
     config.set_default_model(&format!("{}/{}", provider_id, model_name));
 
     // Provider fields are now resolved directly from providers — no cache needed.

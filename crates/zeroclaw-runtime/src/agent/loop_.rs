@@ -2236,7 +2236,7 @@ pub async fn run(
     let provider_runtime_options =
         zeroclaw_providers::provider_runtime_options_from_config(&config);
 
-    let mut provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options_v3(
+    let mut provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options(
         &provider_name,
         resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
         resolved_default.as_ref().and_then(|r| r.provider.base_url.as_deref()),
@@ -2606,7 +2606,7 @@ pub async fn run(
                             new_model
                         );
 
-                        provider = zeroclaw_providers::create_routed_provider_with_options_v3(
+                        provider = zeroclaw_providers::create_routed_provider_with_options(
                             &new_provider,
                             resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
                             resolved_default.as_ref().and_then(|r| r.provider.base_url.as_deref()),
@@ -2919,7 +2919,7 @@ pub async fn run(
                                 new_model
                             );
 
-                            provider = zeroclaw_providers::create_routed_provider_with_options_v3(
+                            provider = zeroclaw_providers::create_routed_provider_with_options(
                                 &new_provider,
                                 resolved_default.as_ref().and_then(|r| r.provider.api_key.as_deref()),
                                 resolved_default.as_ref().and_then(|r| r.provider.base_url.as_deref()),
@@ -3203,7 +3203,7 @@ pub async fn process_message(
         .to_string();
     let provider_runtime_options =
         zeroclaw_providers::provider_runtime_options_from_config(&config);
-    let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options_v3(
+    let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options(
         provider_name,
         resolved_default_pm.as_ref().and_then(|r| r.provider.api_key.as_deref()),
         resolved_default_pm.as_ref().and_then(|r| r.provider.base_url.as_deref()),

@@ -1199,7 +1199,7 @@ fn restore_masked_sensitive_fields(
 
     // Restore api_keys inside providers entries.
     for provider in &mut incoming.providers {
-        if let Some(current_provider) = current.find_provider_v3(&provider.name) {
+        if let Some(current_provider) = current.find_provider(&provider.name) {
             restore_optional_secret(&mut provider.api_key, &current_provider.api_key);
         }
     }

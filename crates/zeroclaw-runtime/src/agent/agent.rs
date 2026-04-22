@@ -501,7 +501,7 @@ impl Agent {
         let provider_runtime_options =
             zeroclaw_providers::provider_runtime_options_from_config(config);
 
-        let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options_v3(
+        let provider: Box<dyn Provider> = zeroclaw_providers::create_routed_provider_with_options(
             provider_name,
             resolved_default_ag.as_ref().and_then(|r| r.provider.api_key.as_deref()),
             resolved_default_ag.as_ref().and_then(|r| r.provider.base_url.as_deref()),

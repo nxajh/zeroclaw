@@ -439,7 +439,7 @@ fn apply_provider_update(
 ) {
     // Preserve existing api protocol if provider already exists
     let api = config
-        .find_provider_v3(&provider)
+        .find_provider(&provider)
         .map(|p| p.api.clone())
         .unwrap_or_else(|| "openai".to_string());
 
@@ -457,7 +457,7 @@ fn apply_provider_update(
             ..Default::default()
         }],
     };
-    config.upsert_provider_v3(provider_config);
+    config.upsert_provider(provider_config);
     config.set_default_model(&format!("{}/{}", provider, model));
 }
 

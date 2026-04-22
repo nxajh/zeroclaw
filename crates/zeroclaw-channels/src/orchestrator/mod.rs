@@ -3051,10 +3051,15 @@ async fn process_channel_message(
                     new_model
                 );
 
+                // Resolve api_key and base_url from config for the new provider
+                let resolved = ctx.prompt_config.find_provider(&new_provider);
+                let api_key = resolved.and_then(|p| p.api_key.clone());
+                let base_url = resolved.and_then(|p| p.base_url.clone());
+
                 match create_resilient_provider_nonblocking(
                     &new_provider,
-                    None,
-                    None,
+                    api_key,
+                    base_url,
                     ctx.reliability.as_ref().clone(),
                     ctx.provider_runtime_options.clone(),
                 )

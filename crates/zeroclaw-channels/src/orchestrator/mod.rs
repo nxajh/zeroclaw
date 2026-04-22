@@ -3054,10 +3054,11 @@ async fn process_channel_message(
                         ctx.max_tool_result_chars,
                         ctx.context_token_budget,
                         None, // shared_budget
-                        None, // model_state
-                        target_channel.as_deref(),
+                        None, // channel
                         ctx.show_reasoning_content,
                         &ctx.prompt_config.providers,
+                        None, // model_state
+                        target_channel.as_deref(),
                     ),
                     ),
                     ),

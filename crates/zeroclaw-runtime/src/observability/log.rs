@@ -130,6 +130,9 @@ impl Observer for LogObserver {
             ObserverEvent::RecoveryCompleted { deploy_id } => {
                 info!(deploy_id = %deploy_id, "recovery.completed");
             }
+            ObserverEvent::RoundText { .. } => {
+                // Per-round text is forwarded via notify task; no logging needed.
+            }
         }
     }
 

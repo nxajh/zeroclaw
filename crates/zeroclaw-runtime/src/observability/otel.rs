@@ -446,8 +446,9 @@ impl Observer for OtelObserver {
             ObserverEvent::DeploymentStarted { .. }
             | ObserverEvent::DeploymentCompleted { .. }
             | ObserverEvent::DeploymentFailed { .. }
-            | ObserverEvent::RecoveryCompleted { .. } => {
-                // DORA deployment events: OTel pass-through not yet implemented.
+            | ObserverEvent::RecoveryCompleted { .. }
+            | ObserverEvent::RoundText { .. } => {
+                // DORA deployment events / round text: OTel pass-through not yet implemented.
             }
         }
     }

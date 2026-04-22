@@ -112,31 +112,41 @@ struct ChannelNotifyObserver {
 
 impl Observer for ChannelNotifyObserver {
     fn record_event(&self, event: &ObserverEvent) {
-        if let ObserverEvent::ToolCallStart { tool, arguments } = event {
-            self.tools_used.store(true, Ordering::Relaxed);
-            let detail = match arguments {
-                Some(args) if !args.is_empty() => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
-                        if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
-                            format!(": `{}`", truncate_with_ellipsis(cmd, 200))
-                        } else if let Some(q) = v.get("query").and_then(|c| c.as_str()) {
-                            format!(": {}", truncate_with_ellipsis(q, 200))
-                        } else if let Some(p) = v.get("path").and_then(|c| c.as_str()) {
-                            format!(": {p}")
-                        } else if let Some(u) = v.get("url").and_then(|c| c.as_str()) {
-                            format!(": {u}")
+        match event {
+            ObserverEvent::ToolCallStart { tool, arguments } => {
+                self.tools_used.store(true, Ordering::Relaxed);
+                let detail = match arguments {
+                    Some(args) if !args.is_empty() => {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+                            if let Some(cmd) = v.get("command").and_then(|c| c.as_str()) {
+                                format!(": `{}`", truncate_with_ellipsis(cmd, 200))
+                            } else if let Some(q) = v.get("query").and_then(|c| c.as_str()) {
+                                format!(": {}", truncate_with_ellipsis(q, 200))
+                            } else if let Some(p) = v.get("path").and_then(|c| c.as_str()) {
+                                format!(": {p}")
+                            } else if let Some(u) = v.get("url").and_then(|c| c.as_str()) {
+                                format!(": {u}")
+                            } else {
+                                let s = args.to_string();
+                                format!(": {}", truncate_with_ellipsis(&s, 120))
+                            }
                         } else {
                             let s = args.to_string();
                             format!(": {}", truncate_with_ellipsis(&s, 120))
                         }
-                    } else {
-                        let s = args.to_string();
-                        format!(": {}", truncate_with_ellipsis(&s, 120))
                     }
+                    _ => String::new(),
+                };
+                let _ = self.tx.send(format!("\u{1F527} `{tool}`{detail}"));
+            }
+            ObserverEvent::RoundText { text } => {
+                if !text.trim().is_empty() {
+                    // Prefix with a marker so the notify task can distinguish
+                    // round text from tool-call notifications.
+                    let _ = self.tx.send(format!("\x00ROUND\x00{text}"));
                 }
-                _ => String::new(),
-            };
-            let _ = self.tx.send(format!("\u{1F527} `{tool}`{detail}"));
+            }
+            _ => {}
         }
         self.inner.record_event(event);
     }
@@ -2942,7 +2952,8 @@ async fn process_channel_message(
     let notify_channel = target_channel.clone();
     let notify_reply_target = msg.reply_target.clone();
     let notify_thread_root = followup_thread_id(&msg);
-    let notify_task = if msg.channel == "cli" || !ctx.show_tool_calls {
+    let notify_show_tool_calls = ctx.show_tool_calls;
+    let notify_task = if msg.channel == "cli" {
         Some(tokio::spawn(async move {
             while notify_rx.recv().await.is_some() {}
         }))
@@ -2951,12 +2962,25 @@ async fn process_channel_message(
             let thread_ts = notify_thread_root;
             while let Some(text) = notify_rx.recv().await {
                 if let Some(ref ch) = notify_channel {
-                    let _ = ch
-                        .send(
-                            &SendMessage::new(&text, &notify_reply_target)
-                                .in_thread(thread_ts.clone()),
-                        )
-                        .await;
+                    // Round text (prefixed with \x00ROUND\x00) is a per-round
+                    // LLM response — send it directly to the user.  All other
+                    // messages are tool-call notifications sent as thread replies
+                    // when show_tool_calls is enabled.
+                    if let Some(round_text) = text.strip_prefix("\x00ROUND\x00") {
+                        let _ = ch
+                            .send(
+                                &SendMessage::new(round_text, &notify_reply_target)
+                                    .in_thread(thread_ts.clone()),
+                            )
+                            .await;
+                    } else if notify_show_tool_calls {
+                        let _ = ch
+                            .send(
+                                &SendMessage::new(&text, &notify_reply_target)
+                                    .in_thread(thread_ts.clone()),
+                            )
+                            .await;
+                    }
                 }
             }
         }))
@@ -3337,68 +3361,29 @@ async fn process_channel_message(
                     }
                 } else {
                     // Non-draft channels (WeChat, WhatsApp, etc.):
-                    // send each round's text as a separate message.
-                    if per_round_texts.len() <= 1 {
-                        // Single round or empty — send the full response as one message.
-                        if let Err(e) = channel
-                            .send(
-                                &SendMessage::new(&delivered_response, &msg.reply_target)
-                                    .in_thread(msg.thread_ts.clone())
-                                    .with_cancellation(cancellation_token.clone()),
-                            )
-                            .await
-                        {
-                            eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
-                        }
-                    } else {
-                        // Multiple rounds — send each round separately.
-                        for (i, round_text) in per_round_texts.iter().enumerate() {
-                            let sanitized = sanitize_channel_response(
-                                round_text,
-                                ctx.tools_registry.as_ref(),
+                    // Each round's text was already delivered in real-time via
+                    // the RoundText observer event + notify task.  Here we only
+                    // need to send the fallback footer if applicable.
+                    if let Some(fb) = fallback_info.as_ref() {
+                        let req_base = fb.requested_provider.split(':').next().unwrap_or("");
+                        let act_base = fb.actual_provider.split(':').next().unwrap_or("");
+                        let same_family = req_base == act_base
+                            || req_base.starts_with(act_base)
+                            || act_base.starts_with(req_base);
+                        if !same_family {
+                            let footer = format!(
+                                "\n\n---\n⚡ `{}` unavailable — response from **{}** (`{}`)\nSwitch model: /models",
+                                fb.requested_provider, fb.actual_provider, fb.actual_model,
                             );
-                            if sanitized.trim().is_empty() {
-                                continue;
-                            }
-                            // Each round sends its own content.  The fallback footer
-                            // (when a different provider family served the request) is
-                            // appended to the last round only.
-                            let final_text = if i == per_round_texts.len() - 1 {
-                                if let Some(fb) = fallback_info.as_ref() {
-                                    let req_base = fb.requested_provider.split(':').next().unwrap_or("");
-                                    let act_base = fb.actual_provider.split(':').next().unwrap_or("");
-                                    let same_family = req_base == act_base
-                                        || req_base.starts_with(act_base)
-                                        || act_base.starts_with(req_base);
-                                    if !same_family {
-                                        format!(
-                                            "{}\n\n---\n⚡ `{}` unavailable — response from **{}** (`{}`)\nSwitch model: /models",
-                                            sanitized,
-                                            fb.requested_provider, fb.actual_provider, fb.actual_model,
-                                        )
-                                    } else {
-                                        sanitized
-                                    }
-                                } else {
-                                    sanitized
-                                }
-                            } else {
-                                sanitized
-                            };
                             if let Err(e) = channel
                                 .send(
-                                    &SendMessage::new(&final_text, &msg.reply_target)
+                                    &SendMessage::new(&footer, &msg.reply_target)
                                         .in_thread(msg.thread_ts.clone())
                                         .with_cancellation(cancellation_token.clone()),
                                 )
                                 .await
                             {
-                                eprintln!(
-                                    "  ❌ Failed to reply on {} (round {}): {e}",
-                                    channel.name(),
-                                    i + 1
-                                );
-                                // Continue sending remaining rounds.
+                                eprintln!("  ❌ Failed to send fallback footer on {}: {e}", channel.name());
                             }
                         }
                     }

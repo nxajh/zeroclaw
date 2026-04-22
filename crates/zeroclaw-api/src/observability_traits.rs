@@ -111,6 +111,10 @@ pub enum ObserverEvent {
         /// Human-readable failure reason.
         reason: String,
     },
+    /// The agent produced text output for a round (tool-loop iteration).
+    /// Non-draft channels can use this to deliver each round immediately
+    /// instead of waiting for the entire tool loop to complete.
+    RoundText { text: String },
     /// Recovery from a failed deployment has completed.
     RecoveryCompleted { deploy_id: String },
 }

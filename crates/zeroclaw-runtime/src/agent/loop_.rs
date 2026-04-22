@@ -1426,6 +1426,9 @@ pub async fn run_tool_call_loop(
             // No tool calls — this is the final response.
             if !display_text.is_empty() {
                 display_texts.push(display_text.clone());
+                observer.record_event(&ObserverEvent::RoundText {
+                    text: display_text.clone(),
+                });
             }
 
             // If text wasn't streamed live, send it now via post-hoc chunking.
@@ -1463,6 +1466,9 @@ pub async fn run_tool_call_loop(
         // Accumulate text from this iteration (tool calls present, loop continues).
         if !display_text.is_empty() {
             display_texts.push(display_text.clone());
+            observer.record_event(&ObserverEvent::RoundText {
+                text: display_text.clone(),
+            });
         }
 
         // Native tool-call providers can return assistant text separately from

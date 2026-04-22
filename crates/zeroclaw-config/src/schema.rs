@@ -584,6 +584,9 @@ pub struct ProviderConfig {
     /// API endpoint base URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Custom User-Agent header sent with every API request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
     /// Models available under this provider.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model: Vec<ModelConfig>,

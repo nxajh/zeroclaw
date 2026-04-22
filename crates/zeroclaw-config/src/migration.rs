@@ -87,6 +87,15 @@ pub fn prepare_table(table: &mut toml::Table) {
     {
         table.insert("channels".to_string(), val);
     }
+
+    // Fresh/new configs without an explicit schema_version are already
+    // structurally at the current version after prepare_table runs.
+    if !table.contains_key("schema_version") {
+        table.insert(
+            "schema_version".to_string(),
+            toml::Value::Integer(CURRENT_SCHEMA_VERSION as i64),
+        );
+    }
 }
 
 // ── File-level migration (comment-preserving) ───────────────────────────────
@@ -99,13 +108,15 @@ pub fn prepare_table(table: &mut toml::Table) {
 /// Returns `None` if already at current version.
 pub fn migrate_file(raw: &str) -> Result<Option<String>> {
     let mut table: toml::Table = toml::from_str(raw).context("Failed to parse config table")?;
+    let original_table = table.clone();
     prepare_table(&mut table);
+    let structural_changes = table != original_table;
     let prepared = toml::to_string(&table).context("Failed to re-serialize prepared table")?;
 
     let mut config: super::schema::Config =
         toml::from_str(&prepared).context("Failed to deserialize config")?;
 
-    if config.schema_version >= CURRENT_SCHEMA_VERSION {
+    if config.schema_version >= CURRENT_SCHEMA_VERSION && !structural_changes {
         return Ok(None);
     }
 

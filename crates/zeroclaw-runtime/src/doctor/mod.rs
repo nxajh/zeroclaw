@@ -611,6 +611,7 @@ fn provider_validation_error(name: &str) -> Option<String> {
         api: "openai".to_string(),
         api_key: None,
         base_url: None,
+            user_agent: None,
         model: vec![],
     };
     match zeroclaw_providers::create_provider_from_config(&config) {
@@ -1087,6 +1088,7 @@ mod tests {
             api: "openai".into(),
             api_key: Some("sk-test".into()),
             base_url: Some("https://api.example.com/v1".into()),
+            user_agent: None,
             model: vec![zeroclaw_config::schema::ModelConfig {
                 model_id: "test-model".into(),
                 ..Default::default()

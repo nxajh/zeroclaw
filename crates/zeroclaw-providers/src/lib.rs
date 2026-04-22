@@ -1077,12 +1077,17 @@ pub fn create_provider_from_config(
 
     match config.api.as_str() {
         "openai" => {
-            let p = OpenAiCompatibleProvider::new(
-                &config.name,
-                base_url,
-                key,
-                AuthStyle::Bearer,
-            );
+            let p = if let Some(ua) = config.user_agent.as_deref() {
+                OpenAiCompatibleProvider::new_with_user_agent(
+                    &config.name,
+                    base_url,
+                    key,
+                    AuthStyle::Bearer,
+                    ua,
+                )
+            } else {
+                OpenAiCompatibleProvider::new(&config.name, base_url, key, AuthStyle::Bearer)
+            };
             Ok(Box::new(p))
         }
         "anthropic" => {

@@ -1077,13 +1077,60 @@ pub fn create_provider_from_config(
 
     match config.api.as_str() {
         "openai" => {
-            let p = OpenAiCompatibleProvider::new(
-                &config.name,
-                base_url,
-                key,
-                AuthStyle::Bearer,
-            );
-            Ok(Box::new(p))
+            let name = config.name.as_str();
+            if matches!(name, "kimi-code" | "kimi_coding" | "kimi_for_coding") {
+                let url = if base_url.is_empty() {
+                    "https://api.kimi.com/coding/v1"
+                } else {
+                    base_url
+                };
+                Ok(Box::new(OpenAiCompatibleProvider::new_with_user_agent(
+                    "Kimi Code",
+                    url,
+                    key,
+                    AuthStyle::Bearer,
+                    "KimiCLI/0.77",
+                )))
+            } else if is_qwen_oauth_alias(name) {
+                let url = if base_url.is_empty() {
+                    QWEN_OAUTH_BASE_FALLBACK_URL
+                } else {
+                    base_url
+                };
+                Ok(Box::new(
+                    OpenAiCompatibleProvider::new_with_user_agent_and_vision(
+                        "Qwen Code",
+                        url,
+                        key,
+                        AuthStyle::Bearer,
+                        "QwenCode/1.0",
+                        true,
+                    ),
+                ))
+            } else if is_bailian_alias(name) {
+                let url = if base_url.is_empty() {
+                    BAILIAN_BASE_URL
+                } else {
+                    base_url
+                };
+                Ok(Box::new(
+                    OpenAiCompatibleProvider::new_with_user_agent_and_vision(
+                        "Bailian",
+                        url,
+                        key,
+                        AuthStyle::Bearer,
+                        "openclaw",
+                        true,
+                    ),
+                ))
+            } else {
+                Ok(Box::new(OpenAiCompatibleProvider::new(
+                    &config.name,
+                    base_url,
+                    key,
+                    AuthStyle::Bearer,
+                )))
+            }
         }
         "anthropic" => {
             let mut p = if base_url.is_empty() {

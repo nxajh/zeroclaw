@@ -1769,6 +1769,7 @@ mod tests {
                 }],
             }],
             temperature: 0.7,
+            thinking: None,
             tools: None,
             tool_choice: None,
             stream: None,

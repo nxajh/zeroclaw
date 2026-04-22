@@ -3058,7 +3058,6 @@ async fn process_channel_message(
                         ctx.show_reasoning_content,
                         &ctx.prompt_config.providers,
                         None, // model_state
-                        target_channel.as_deref(),
                     ),
                     ),
                     ),

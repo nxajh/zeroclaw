@@ -763,6 +763,8 @@ impl Provider for OllamaProvider {
                 input_tokens: response.prompt_eval_count,
                 output_tokens: response.eval_count,
                 cached_input_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
             })
         } else {
             None

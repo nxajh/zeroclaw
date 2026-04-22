@@ -172,6 +172,8 @@ impl Provider for TraceLlmProvider {
                     input_tokens: Some(input_tokens),
                     output_tokens: Some(output_tokens),
                     cached_input_tokens: None,
+                    cache_write_tokens: None,
+                    reasoning_tokens: None,
                 }),
                 reasoning_content: None,
             }),
@@ -195,6 +197,8 @@ impl Provider for TraceLlmProvider {
                         input_tokens: Some(input_tokens),
                         output_tokens: Some(output_tokens),
                         cached_input_tokens: None,
+                        cache_write_tokens: None,
+                        reasoning_tokens: None,
                     }),
                     reasoning_content: None,
                 })

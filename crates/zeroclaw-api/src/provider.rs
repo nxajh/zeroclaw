@@ -58,6 +58,10 @@ pub struct TokenUsage {
     /// Tokens served from the provider's prompt cache (Anthropic `cache_read_input_tokens`,
     /// OpenAI `prompt_tokens_details.cached_tokens`).
     pub cached_input_tokens: Option<u64>,
+    /// Tokens written to the provider's prompt cache (Anthropic `cache_creation_input_tokens`).
+    pub cache_write_tokens: Option<u64>,
+    /// Reasoning/thinking tokens billed separately (OpenAI `completion_tokens_details.reasoning_tokens`).
+    pub reasoning_tokens: Option<u64>,
 }
 
 /// An LLM response that may contain text, tool calls, or both.

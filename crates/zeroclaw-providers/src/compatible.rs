@@ -507,9 +507,33 @@ impl OpenAiCompatibleProvider {
     fn reasoning_effort_for_model(&self, model: &str) -> Option<String> {
         let id = model.rsplit('/').next().unwrap_or(model);
         let supports_reasoning_effort = id.starts_with("gpt-5") || id.contains("codex");
+        // GLM/Kimi use a `thinking` object instead of `reasoning_effort`
+        if self.uses_thinking_object() {
+            return None;
+        }
         supports_reasoning_effort
             .then(|| self.reasoning_effort.clone())
             .flatten()
+    }
+
+    /// Whether this provider expects a `thinking` object in the request body
+    /// (GLM-4, Kimi) instead of `reasoning_effort`.
+    fn uses_thinking_object(&self) -> bool {
+        matches!(
+            self.name.as_str(),
+            "glm" | "zhipu" | "kimi" | "moonshot"
+        ) || matches!(self.auth_header, AuthStyle::ZhipuJwt)
+    }
+
+    /// Build a `thinking` object for providers that use it (GLM, Kimi).
+    /// Returns `None` when no reasoning_effort is configured.
+    fn thinking_object_for_request(&self) -> Option<serde_json::Value> {
+        if !self.uses_thinking_object() {
+            return None;
+        }
+        self.reasoning_effort.as_ref().map(|_| {
+            serde_json::json!({ "type": "enabled" })
+        })
     }
 }
 
@@ -522,6 +546,9 @@ struct ApiChatRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    /// GLM/Kimi: thinking object used instead of `reasoning_effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -570,6 +597,17 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    /// Kimi reports cached tokens at `usage.cached_tokens` (top-level), not in prompt_tokens_details.
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -724,6 +762,9 @@ struct NativeChatRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    /// GLM/Kimi: thinking object used instead of `reasoning_effort`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1754,6 +1795,7 @@ impl Provider for OpenAiCompatibleProvider {
             temperature,
             stream: Some(false),
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: self.thinking_object_for_request(),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -1862,6 +1904,7 @@ impl Provider for OpenAiCompatibleProvider {
             temperature,
             stream: Some(false),
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: None,
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -1961,6 +2004,7 @@ impl Provider for OpenAiCompatibleProvider {
             temperature,
             stream: Some(false),
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: None,
             tool_stream: self.tool_stream_for_tools(!tools.is_empty()),
             tools: if tools.is_empty() {
                 None
@@ -2003,10 +2047,19 @@ impl Provider for OpenAiCompatibleProvider {
 
         let body = response.text().await?;
         let chat_response = parse_chat_response_body(&self.name, &body)?;
-        let usage = chat_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+        let usage = chat_response.usage.map(|u| {
+            let cached = u
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .or(u.cached_tokens);
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: cached,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            }
         });
         let choice = chat_response
             .choices
@@ -2059,6 +2112,7 @@ impl Provider for OpenAiCompatibleProvider {
             temperature,
             stream: Some(false),
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: self.thinking_object_for_request(),
             tool_stream: self
                 .tool_stream_for_tools(tools.as_ref().is_some_and(|tools| !tools.is_empty())),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
@@ -2141,10 +2195,19 @@ impl Provider for OpenAiCompatibleProvider {
         }
 
         let native_response: ApiChatResponse = response.json().await?;
-        let usage = native_response.usage.map(|u| TokenUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+        let usage = native_response.usage.map(|u| {
+            let cached = u
+                .prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .or(u.cached_tokens);
+            TokenUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+                cached_input_tokens: cached,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
+            }
         });
         let message = native_response
             .choices
@@ -2189,12 +2252,14 @@ impl Provider for OpenAiCompatibleProvider {
         let effective_messages = self.strip_native_tool_messages(&effective_messages);
 
         let tools = Self::convert_tool_specs(request.tools);
+        let thinking_obj = self.thinking_object_for_request();
         let payload = if has_tools {
             serde_json::to_value(NativeChatRequest {
                 model: model.to_string(),
                 messages: Self::convert_messages_for_native(&effective_messages, !merge),
                 temperature,
-                reasoning_effort: self.reasoning_effort.clone(),
+                reasoning_effort: self.reasoning_effort_for_model(model),
+                thinking: thinking_obj.clone(),
                 tool_stream: if options.enabled {
                     self.tool_stream_for_tools(true)
                 } else {
@@ -2218,7 +2283,8 @@ impl Provider for OpenAiCompatibleProvider {
                 model: model.to_string(),
                 messages,
                 temperature,
-                reasoning_effort: self.reasoning_effort.clone(),
+                reasoning_effort: self.reasoning_effort_for_model(model),
+                thinking: thinking_obj,
                 tool_stream: if options.enabled {
                     self.tool_stream_for_tools(false)
                 } else {
@@ -2325,6 +2391,7 @@ impl Provider for OpenAiCompatibleProvider {
             temperature,
             stream: Some(options.enabled),
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: None,
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -2412,6 +2479,7 @@ impl Provider for OpenAiCompatibleProvider {
             temperature,
             stream: Some(options.enabled),
             reasoning_effort: self.reasoning_effort_for_model(model),
+            thinking: None,
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -2537,6 +2605,7 @@ mod tests {
             temperature: 0.4,
             stream: Some(false),
             reasoning_effort: None,
+            thinking: None,
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -3526,6 +3595,7 @@ mod tests {
             temperature: 0.7,
             stream: Some(false),
             reasoning_effort: None,
+            thinking: None,
             tool_stream: None,
             tools: Some(tools),
             tool_choice: Some("auto".to_string()),
@@ -3549,6 +3619,7 @@ mod tests {
             temperature: 0.7,
             stream: Some(false),
             reasoning_effort: None,
+            thinking: None,
             tool_stream: provider.tool_stream_for_tools(true),
             tools: Some(vec![serde_json::json!({
                 "type": "function",
@@ -3583,6 +3654,7 @@ mod tests {
             temperature: 0.7,
             stream: Some(false),
             reasoning_effort: None,
+            thinking: None,
             tool_stream: provider.tool_stream_for_tools(true),
             tools: Some(vec![serde_json::json!({
                 "type": "function",

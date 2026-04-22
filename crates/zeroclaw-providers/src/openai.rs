@@ -65,8 +65,12 @@ struct NativeChatRequest {
     tools: Option<Vec<NativeToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    /// Used for standard models (gpt-4o, etc.).
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// Used for reasoning models (o-series, gpt-5); replaces `max_tokens`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -142,12 +146,20 @@ struct UsageInfo {
     completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +208,31 @@ impl OpenAiProvider {
     pub fn with_max_tokens(mut self, max_tokens: Option<u32>) -> Self {
         self.max_tokens = max_tokens;
         self
+    }
+
+    /// Whether the model uses `max_completion_tokens` instead of `max_tokens`
+    /// and may return `reasoning_tokens` in `completion_tokens_details`.
+    fn is_reasoning_model(model: &str) -> bool {
+        matches!(
+            model,
+            "gpt-5"
+                | "gpt-5-2025-08-07"
+                | "gpt-5-mini"
+                | "gpt-5-mini-2025-08-07"
+                | "gpt-5-nano"
+                | "gpt-5-nano-2025-08-07"
+                | "gpt-5.1-chat-latest"
+                | "gpt-5.2-chat-latest"
+                | "gpt-5.3-chat-latest"
+                | "o1"
+                | "o1-2024-12-17"
+                | "o3"
+                | "o3-2025-04-16"
+                | "o3-mini"
+                | "o3-mini-2025-01-31"
+                | "o4-mini"
+                | "o4-mini-2025-04-16"
+        )
     }
 
     /// Adjust temperature for models that have specific requirements.
@@ -417,13 +454,15 @@ impl Provider for OpenAiProvider {
         let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
 
         let tools = Self::convert_tools(request.tools);
+        let is_reasoning = Self::is_reasoning_model(model);
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
             temperature: adjusted_temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
-            max_tokens: self.max_tokens,
+            max_tokens: if is_reasoning { None } else { self.max_tokens },
+            max_completion_tokens: if is_reasoning { self.max_tokens } else { None },
         };
 
         let response = self
@@ -443,6 +482,8 @@ impl Provider for OpenAiProvider {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            cache_write_tokens: None,
+            reasoning_tokens: u.completion_tokens_details.and_then(|d| d.reasoning_tokens),
         });
         let message = native_response
             .choices
@@ -484,13 +525,15 @@ impl Provider for OpenAiProvider {
             )
         };
 
+        let is_reasoning = Self::is_reasoning_model(model);
         let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages(messages),
             temperature: adjusted_temperature,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
-            max_tokens: self.max_tokens,
+            max_tokens: if is_reasoning { None } else { self.max_tokens },
+            max_completion_tokens: if is_reasoning { self.max_tokens } else { None },
         };
 
         let response = self
@@ -510,6 +553,8 @@ impl Provider for OpenAiProvider {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_input_tokens: u.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            cache_write_tokens: None,
+            reasoning_tokens: u.completion_tokens_details.and_then(|d| d.reasoning_tokens),
         });
         let message = native_response
             .choices

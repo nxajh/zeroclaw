@@ -405,6 +405,8 @@ impl CopilotProvider {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
             cached_input_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
         });
         let choice = api_response
             .choices

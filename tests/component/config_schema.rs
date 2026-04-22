@@ -3,15 +3,14 @@
 //! Validates: config defaults, backward compatibility, invalid input rejection,
 //! and gateway/security/agent config boundary conditions.
 
-use zeroclaw::config::migration::{self, V1Compat};
+use zeroclaw::config::migration;
 use zeroclaw::config::{AutonomyConfig, ChannelsConfig, Config, GatewayConfig, SecurityConfig};
 
 fn migrate(toml_str: &str) -> Config {
     let mut table: toml::Table = toml::from_str(toml_str).expect("failed to parse table");
     migration::prepare_table(&mut table);
     let prepared = toml::to_string(&table).expect("failed to re-serialize");
-    let compat: V1Compat = toml::from_str(&prepared).expect("failed to deserialize");
-    compat.into_config()
+    toml::from_str(&prepared).expect("failed to deserialize")
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,14 +59,15 @@ port = "not_a_number"
 }
 
 #[test]
-fn config_wrong_type_for_temperature_fails() {
+fn config_wrong_type_for_schema_version_fails() {
+    // schema_version is u32; a string value must fail to deserialize.
     let toml_str = r#"
-default_temperature = "hot"
+schema_version = "three"
 "#;
-    let result: Result<V1Compat, _> = toml::from_str(toml_str);
+    let result: Result<Config, _> = toml::from_str(toml_str);
     assert!(
         result.is_err(),
-        "string for f64 temperature should fail to parse"
+        "string for u32 schema_version should fail to parse"
     );
 }
 

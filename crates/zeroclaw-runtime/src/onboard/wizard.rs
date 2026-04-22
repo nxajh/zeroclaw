@@ -6272,7 +6272,7 @@ mod tests {
         assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         let entry = config.providers.iter().find(|p| p.name == "openrouter").expect("provider");
         assert_eq!(entry.api_key.as_deref(), Some("sk-updated"));
-        assert_eq!(entry.model.as_deref(), Some("openai/gpt-5.2"));
+        assert_eq!(entry.model.first().map(|m| m.model_id.as_str()), Some("openai/gpt-5.2"));
         assert_eq!(
             entry.base_url.as_deref(),
             Some("https://openrouter.ai/api/v1")
@@ -6315,7 +6315,7 @@ mod tests {
         // V2 canonical location.
         assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("anthropic/")), Some(true));
         let entry = config.providers.iter().find(|p| p.name == "anthropic").expect("provider");
-        assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-5-20250929"));
+        assert_eq!(entry.model.first().map(|m| m.model_id.as_str()), Some("claude-sonnet-4-5-20250929"));
         assert!(entry.api_key.is_none());
         assert!(entry.base_url.is_none());
 
@@ -6351,8 +6351,8 @@ mod tests {
         // V2 canonical locations.
         assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         assert_eq!(
-            config.effective_model(None).map(|r| r.model.model_id.as_str()),
-            Some("custom-model-946")
+            config.effective_model(None).map(|r| r.model.model_id.clone()),
+            Some("custom-model-946".to_string())
         );
         assert_eq!(
             config.providers.iter().find(|p| p.name == "openrouter").and_then(|p| p.api_key.as_deref()),
@@ -6362,8 +6362,8 @@ mod tests {
         // Resolved through providers.
         assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         assert_eq!(
-            config.effective_model(None).map(|r| r.model.model_id.as_str()),
-            Some("custom-model-946")
+            config.effective_model(None).map(|r| r.model.model_id.clone()),
+            Some("custom-model-946".to_string())
         );
 
         // Serialized TOML uses V2 layout.
@@ -6393,8 +6393,8 @@ mod tests {
         let expected = default_model_for_provider("anthropic");
         assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("anthropic/")), Some(true));
         assert_eq!(
-            config.effective_model(None).map(|r| r.model.model_id.as_str()),
-            Some(expected.as_str())
+            config.effective_model(None).map(|r| r.model.model_id.clone()),
+            Some(expected)
         );
     }
 
@@ -6458,8 +6458,8 @@ mod tests {
 
         assert_eq!(config.agent.default_model.as_deref().map(|s| s.starts_with("openrouter/")), Some(true));
         assert_eq!(
-            config.effective_model(None).map(|r| r.model.model_id.as_str()),
-            Some("custom-model-fresh")
+            config.effective_model(None).map(|r| r.model.model_id.clone()),
+            Some("custom-model-fresh".to_string())
         );
         assert_eq!(
             config.providers.first().and_then(|p| p.api_key.as_deref()),

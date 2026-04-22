@@ -929,6 +929,8 @@ impl BedrockProvider {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
             cached_input_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
         });
 
         if let Some(output) = response.output

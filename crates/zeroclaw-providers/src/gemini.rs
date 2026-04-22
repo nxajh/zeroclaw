@@ -1181,6 +1181,8 @@ impl GeminiProvider {
             input_tokens: u.prompt_token_count,
             output_tokens: u.candidates_token_count,
             cached_input_tokens: None,
+            cache_write_tokens: None,
+            reasoning_tokens: None,
         });
 
         let text = result

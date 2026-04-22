@@ -1145,7 +1145,6 @@ async fn main() -> Result<()> {
                 temperature,
                 ..
             } => {
-                let resolved = config.effective_model(None);
                 let final_temperature = temperature.unwrap_or(0.7);
                 if let Some(p) = &provider {
                     config.agent.default_model = Some(p.clone());
@@ -1153,20 +1152,15 @@ async fn main() -> Result<()> {
                 if let Some(m) = &model {
                     config.set_default_model(m);
                 }
-
-                let provider_name = resolved.as_ref().map(|r| r.provider.name.as_str()).unwrap_or("openai");
-                let provider = zeroclaw::providers::create_provider(
-                    provider_name,
-                    resolved.as_ref().and_then(|r| r.provider.api_key.as_deref()),
-                )?;
-                let model_name = resolved
-                    .as_ref()
-                    .map(|r| r.model.model_id.as_str())
-                    .unwrap_or("default");
+                let resolved = config
+                    .effective_model(None)
+                    .ok_or_else(|| anyhow::anyhow!("No provider configured. Add a [[providers]] entry to config.toml"))?;
+                let model_name = resolved.model.model_id.clone();
+                let provider = zeroclaw::providers::create_provider_from_config(&resolved.provider)?;
                 match message {
                     Some(msg) => {
                         let response = provider
-                            .simple_chat(&msg, model_name, final_temperature)
+                            .simple_chat(&msg, &model_name, final_temperature)
                             .await?;
                         println!("{response}");
                     }
@@ -1181,7 +1175,7 @@ async fn main() -> Result<()> {
                                 break;
                             }
                             let response = provider
-                                .simple_chat(line.trim(), model_name, final_temperature)
+                                .simple_chat(line.trim(), &model_name, final_temperature)
                                 .await?;
                             println!("{response}");
                         }

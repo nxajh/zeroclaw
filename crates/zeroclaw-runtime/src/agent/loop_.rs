@@ -649,6 +649,7 @@ pub async fn agent_turn(
     activated_tools: Option<&std::sync::Arc<std::sync::Mutex<crate::tools::ActivatedToolSet>>>,
     model_switch_callback: Option<ModelSwitchCallback>,
     channel: Option<&dyn Channel>,
+    providers: &[zeroclaw_config::schema::ProviderConfig],
 ) -> Result<String> {
     let texts = run_tool_call_loop(
         provider,
@@ -677,6 +678,7 @@ pub async fn agent_turn(
         None, // shared_budget: no shared budget for legacy callers
         channel,
         true, // show_reasoning_content: default for legacy callers
+        providers,
     )
     .await
     .map(|texts| texts.join(""))?;
@@ -820,6 +822,7 @@ pub async fn run_tool_call_loop(
     shared_budget: Option<Arc<std::sync::atomic::AtomicUsize>>,
     channel: Option<&dyn Channel>,
     show_reasoning_content: bool,
+    providers: &[zeroclaw_config::schema::ProviderConfig],
 ) -> Result<Vec<String>> {
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
@@ -957,7 +960,20 @@ pub async fn run_tool_call_loop(
             && !provider.supports_vision()
         {
             if let Some(ref vp) = multimodal_config.vision_provider {
-                let vp_instance = zeroclaw_providers::create_provider(vp, None)
+                let (vp_provider_name, _vp_model) = vp.split_once('/').ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "failed to create vision provider '{vp}': must use 'provider/model_id' format"
+                    )
+                })?;
+                let vp_config = providers
+                    .iter()
+                    .find(|p| p.name == vp_provider_name)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "failed to create vision provider '{vp}': no provider named '{vp_provider_name}' configured"
+                        )
+                    })?;
+                let vp_instance = zeroclaw_providers::create_provider_from_config(vp_config)
                     .map_err(|e| anyhow::anyhow!("failed to create vision provider '{vp}': {e}"))?;
                 if !vp_instance.supports_vision() {
                     return Err(ProviderCapabilityError {
@@ -986,10 +1002,8 @@ pub async fn run_tool_call_loop(
 
         let (active_provider, active_provider_name, active_model): (&dyn Provider, &str, &str) =
             if let Some(ref vp_box) = vision_provider_box {
-                let vp_name = multimodal_config
-                    .vision_provider
-                    .as_deref()
-                    .unwrap_or(provider_name);
+                let vp_route = multimodal_config.vision_provider.as_deref().unwrap_or(provider_name);
+                let vp_name = vp_route.split('/').next().unwrap_or(vp_route);
                 let vm = multimodal_config.vision_model.as_deref().unwrap_or(model);
                 (vp_box.as_ref(), vp_name, vm)
             } else {
@@ -2573,6 +2587,7 @@ pub async fn run(
                         None, // shared_budget
                         None, // channel: CLI mode — uses prompt_cli
                         config.agent.show_reasoning_content,
+                        &config.providers,
                     ),
                 )
                 .await
@@ -2884,6 +2899,7 @@ pub async fn run(
                             None, // shared_budget
                             None, // channel: interactive CLI — uses prompt_cli
                             config.agent.show_reasoning_content,
+                            &config.providers,
                         ),
                     )
                     .await
@@ -3397,6 +3413,7 @@ pub async fn process_message(
         activated_handle_pm.as_ref(),
         None,
         None, // channel: process_message path has no channel ref
+        &config.providers,
     )
     .await
 }
@@ -4495,6 +4512,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -4552,6 +4570,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect_err("oversized payload must fail");
@@ -4603,11 +4622,12 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("valid multimodal payload should pass");
 
-        assert_eq!(result, "vision-ok");
+        assert_eq!(result.join(""), "vision-ok");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -4653,6 +4673,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect_err("should fail without vision_provider config");
@@ -4710,6 +4731,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect_err("should fail when vision provider cannot be created");
@@ -4767,11 +4789,12 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("text-only messages should succeed with default provider");
 
-        assert_eq!(result, "hello world");
+        assert_eq!(result.join(""), "hello world");
     }
 
     /// When `vision_provider` is set but `vision_model` is not, the default
@@ -4825,6 +4848,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect_err("should fail due to nonexistent vision provider");
@@ -4881,11 +4905,12 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("empty image markers should not trigger vision routing");
 
-        assert_eq!(result, "handled");
+        assert_eq!(result.join(""), "handled");
     }
 
     /// Multiple image markers should still trigger vision routing when
@@ -4937,6 +4962,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect_err("should attempt vision provider creation for multiple images");
@@ -5076,13 +5102,14 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("parallel execution should complete");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
         assert!(
             max_active.load(Ordering::SeqCst) >= 1,
@@ -5155,13 +5182,14 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("cron_add delivery defaults should be injected");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
 
         let recorded = recorded_args
@@ -5226,13 +5254,14 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("explicit delivery mode should be preserved");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
 
         let recorded = recorded_args
@@ -5292,13 +5321,14 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -5371,13 +5401,14 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("non-interactive shell should succeed for low-risk command");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
 
         let tool_results = history
@@ -5440,13 +5471,14 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("loop should finish with exempt tool executing twice");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
         assert_eq!(
             invocations.load(Ordering::SeqCst),
@@ -5529,6 +5561,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("loop should complete");
@@ -5592,13 +5625,14 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("native fallback id flow should complete");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert!(
@@ -5682,6 +5716,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("native tool-call text should be relayed through on_delta");
@@ -5704,8 +5739,8 @@ mod tests {
             "tool-call progress line should still be relayed"
         );
         assert!(
-            result.ends_with("Final answer"),
-            "accumulated result should end with final answer, got: {result}"
+            result.join("").ends_with("Final answer"),
+            "accumulated result should end with final answer, got: {result:?}"
         );
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
     }
@@ -5749,6 +5784,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("streaming provider should complete");
@@ -5763,7 +5799,7 @@ mod tests {
             }
         }
 
-        assert_eq!(result, "streamed final answer");
+        assert_eq!(result.join(""), "streamed final answer");
         assert_eq!(
             visible_deltas, "streamed final answer",
             "draft should receive upstream deltas once without post-hoc duplication"
@@ -5819,6 +5855,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("streaming tool loop should execute tool and finish");
@@ -5834,8 +5871,8 @@ mod tests {
         }
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 2);
@@ -5896,6 +5933,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("native streaming events should preserve tool loop semantics");
@@ -5911,8 +5949,8 @@ mod tests {
         }
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(provider.stream_calls.load(Ordering::SeqCst), 2);
@@ -5982,6 +6020,7 @@ mod tests {
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("routed streaming provider should complete");
@@ -5996,7 +6035,7 @@ mod tests {
             }
         }
 
-        assert_eq!(result, "routed streamed answer");
+        assert_eq!(result.join(""), "routed streamed answer");
         assert_eq!(
             visible_deltas, "routed streamed answer",
             "routed draft should receive upstream deltas once without post-hoc duplication"
@@ -6066,6 +6105,7 @@ mod tests {
                 Some(&activated),
                 None,
                 None, // channel
+                &[], // providers
             )
             .await
             .expect("wrapper path should execute activated tools");
@@ -7045,6 +7085,7 @@ Let me check the result."#;
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("tool loop should complete");
@@ -7075,8 +7116,8 @@ Let me check the result."#;
         );
 
         assert!(
-            result.ends_with("I could not execute that command."),
-            "result should end with error message, got: {result}"
+            result.join("").ends_with("I could not execute that command."),
+            "result should end with error message, got: {result:?}"
         );
     }
 
@@ -7151,6 +7192,8 @@ Let me check the result."#;
                     input_tokens: Some(1_000),
                     output_tokens: Some(200),
                     cached_input_tokens: None,
+                    cache_write_tokens: None,
+                    reasoning_tokens: None,
                 }),
                 reasoning_content: None,
             }]))),
@@ -7205,15 +7248,16 @@ Let me check the result."#;
                     0,
                     None,
                     None, // channel
-            true, // show_reasoning_content
+                    true, // show_reasoning_content
+                    &[], // providers
                 ),
             )
             .await
             .expect("tool loop should succeed");
 
         assert!(
-            result.ends_with("done"),
-            "result should end with 'done', got: {result}"
+            result.join("").ends_with("done"),
+            "result should end with 'done', got: {result:?}"
         );
         let summary = tracker.get_summary().unwrap();
         assert_eq!(summary.request_count, 1);
@@ -7292,7 +7336,8 @@ Let me check the result."#;
                     0,
                     None,
                     None, // channel
-            true, // show_reasoning_content
+                    true, // show_reasoning_content
+                    &[], // providers
                 ),
             )
             .await
@@ -7318,6 +7363,8 @@ Let me check the result."#;
                     input_tokens: Some(500),
                     output_tokens: Some(100),
                     cached_input_tokens: None,
+                    cache_write_tokens: None,
+                    reasoning_tokens: None,
                 }),
                 reasoning_content: None,
             }]))),
@@ -7353,10 +7400,11 @@ Let me check the result."#;
             None,
             None, // channel
             true, // show_reasoning_content
+            &[], // providers
         )
         .await
         .expect("should succeed without cost scope");
 
-        assert_eq!(result, "ok");
+        assert_eq!(result.join(""), "ok");
     }
 }

@@ -992,8 +992,8 @@ mod tests {
         let entries = all_integrations();
         let mut config = Config::default();
 
-        // Helper to set default model with a single provider
-        let mut set_provider = |name: &str| {
+        // Helper to set default model with a single provider (free fn avoids borrow conflict)
+        fn set_provider(config: &mut zeroclaw_config::schema::Config, name: &str) {
             config.providers.clear();
             config.providers.push(zeroclaw_config::schema::ProviderConfig {
                 name: name.to_string(),
@@ -1005,45 +1005,45 @@ mod tests {
                     ..Default::default()
                 }],
             });
-            config.agent.default_model = Some(format!("{}/test", name));
-        };
+            config.agent.default_model = Some(format!("{name}/test"));
+        }
 
-        set_provider("minimax-cn");
+        set_provider(&mut config, "minimax-cn");
         let minimax = entries.iter().find(|e| e.name == "MiniMax").unwrap();
         assert!(matches!(
             (minimax.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        set_provider("glm-cn");
+        set_provider(&mut config, "glm-cn");
         let glm = entries.iter().find(|e| e.name == "GLM").unwrap();
         assert!(matches!(
             (glm.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        set_provider("moonshot-intl");
+        set_provider(&mut config, "moonshot-intl");
         let moonshot = entries.iter().find(|e| e.name == "Moonshot").unwrap();
         assert!(matches!(
             (moonshot.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        set_provider("qwen-intl");
+        set_provider(&mut config, "qwen-intl");
         let qwen = entries.iter().find(|e| e.name == "Qwen").unwrap();
         assert!(matches!(
             (qwen.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        set_provider("zai-cn");
+        set_provider(&mut config, "zai-cn");
         let zai = entries.iter().find(|e| e.name == "Z.AI").unwrap();
         assert!(matches!(
             (zai.status_fn)(&config),
             IntegrationStatus::Active
         ));
 
-        set_provider("baidu");
+        set_provider(&mut config, "baidu");
         let qianfan = entries.iter().find(|e| e.name == "Qianfan").unwrap();
         assert!(matches!(
             (qianfan.status_fn)(&config),

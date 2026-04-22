@@ -88,6 +88,8 @@ mod tests {
                 input_tokens: Some(100),
                 output_tokens: Some(50),
                 cached_input_tokens: None,
+                cache_write_tokens: None,
+                reasoning_tokens: None,
             }),
             reasoning_content: None,
         };

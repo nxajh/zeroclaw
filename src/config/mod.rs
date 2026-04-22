@@ -5,6 +5,7 @@ pub mod workspace;
 
 pub use schema::{
     AgentConfig, AssemblyAiSttConfig, AuditConfig, AutonomyConfig, BackupConfig,
+    ModelCostConfig, ModelConfig, ProviderConfig, ResolvedModel,
     BrowserComputerUseConfig, BrowserConfig, BuiltinHooksConfig, ChannelsConfig,
     ClassificationRule, ClaudeCodeConfig, ClaudeCodeRunnerConfig, CloudOpsConfig, CodexCliConfig,
     ComposioConfig, Config, ConversationalAiConfig, CostConfig, CronConfig, CronJobDecl,
@@ -200,9 +201,9 @@ mod tests {
     #[test]
     fn reexported_config_default_is_constructible() {
         let config = Config::default();
-
-        // Config::default() no longer has provider cache fields; just verify providers is constructible
-        assert!(config.providers_legacy.fallback.is_none() || config.providers_legacy.fallback.is_some());
+        // v3: providers is Vec<ProviderConfig>; verify defaults are valid
+        assert!(config.providers.is_empty());
+        assert!(config.model_routes.is_empty());
     }
 
     #[test]

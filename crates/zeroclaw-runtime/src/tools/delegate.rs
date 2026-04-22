@@ -1183,6 +1183,7 @@ impl DelegateTool {
                 None, // channel: delegate subagents don't support approval
                 true, // show_reasoning_content: default for delegate subagents
                 self.config.providers.as_slice(),
+                None, // model_state: delegate subagents don't use model_state
             ),
         )
         .await;

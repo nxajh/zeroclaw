@@ -133,6 +133,50 @@ impl CostTracker {
         Ok(())
     }
 
+    /// Returns the cache hit ratio over the last `n` recorded requests.
+    /// Returns `None` when there are no records or all input_tokens are zero.
+    pub fn recent_cache_ratio(&self, n: usize) -> Option<f64> {
+        let session_costs = self.lock_session_costs();
+        let window: Vec<_> = session_costs.iter().rev().take(n).collect();
+
+        if window.is_empty() {
+            return None;
+        }
+
+        let mut total_input = 0u64;
+        let mut total_cached = 0u64;
+        for record in window {
+            total_input = total_input.saturating_add(record.usage.input_tokens);
+            total_cached = total_cached.saturating_add(record.usage.cached_input_tokens);
+        }
+
+        if total_input == 0 {
+            None
+        } else {
+            Some(total_cached as f64 / total_input as f64)
+        }
+    }
+
+    /// Returns a snapshot of session statistics useful for pop decisions:
+    /// (total_input, total_cached, total_effective_input, cache_hit_ratio)
+    pub fn session_usage_snapshot(&self) -> (u64, u64, u64, f64) {
+        let session_costs = self.lock_session_costs();
+        let mut total_input = 0u64;
+        let mut total_cached = 0u64;
+        let mut total_effective = 0u64;
+        let mut total_output = 0u64;
+
+        for record in session_costs.iter() {
+            total_input = total_input.saturating_add(record.usage.input_tokens);
+            total_cached = total_cached.saturating_add(record.usage.cached_input_tokens);
+            total_effective = total_effective.saturating_add(record.usage.effective_input_tokens);
+            total_output = total_output.saturating_add(record.usage.output_tokens);
+        }
+
+        let ratio = if total_input == 0 { 0.0 } else { total_cached as f64 / total_input as f64 };
+        (total_input, total_cached, total_effective, ratio)
+    }
+
     /// Get the current cost summary.
     pub fn get_summary(&self) -> Result<CostSummary> {
         let (daily_cost, monthly_cost) = {
@@ -145,12 +189,14 @@ impl CostTracker {
             .iter()
             .map(|record| record.usage.cost_usd)
             .sum();
-        let total_tokens: u64 = session_costs
-            .iter()
-            .map(|record| record.usage.total_tokens)
-            .sum();
         let request_count = session_costs.len();
         let by_model = build_session_model_stats(&session_costs);
+
+        let (total_input, total_cached, total_effective, cache_ratio) =
+            self.session_usage_snapshot();
+
+        let total_tokens = total_effective
+            .saturating_add(session_costs.iter().map(|r| r.usage.output_tokens).sum::<u64>());
 
         Ok(CostSummary {
             session_cost_usd: session_cost,
@@ -158,6 +204,10 @@ impl CostTracker {
             monthly_cost_usd: monthly_cost,
             total_tokens,
             request_count,
+            total_input_tokens: total_input,
+            total_cached_tokens: total_cached,
+            total_effective_input_tokens: total_effective,
+            cache_hit_ratio: cache_ratio,
             by_model,
         })
     }
@@ -244,11 +294,23 @@ fn build_session_model_stats(session_costs: &[CostRecord]) -> HashMap<String, Mo
                 cost_usd: 0.0,
                 total_tokens: 0,
                 request_count: 0,
+                cache_hit_ratio: 0.0,
             });
 
         entry.cost_usd += record.usage.cost_usd;
         entry.total_tokens += record.usage.total_tokens;
         entry.request_count += 1;
+
+        // Update cache_hit_ratio as a running weighted average
+        let prev_total_input =
+            entry.total_tokens.saturating_sub(record.usage.input_tokens);
+        let new_total_input = prev_total_input.saturating_add(record.usage.input_tokens);
+        if new_total_input > 0 {
+            let prev_cached =
+                (entry.cache_hit_ratio * prev_total_input as f64).round() as u64;
+            let new_cached = prev_cached.saturating_add(record.usage.cached_input_tokens);
+            entry.cache_hit_ratio = new_cached as f64 / new_total_input as f64;
+        }
     }
 
     by_model
@@ -467,7 +529,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
 
-        let usage = TokenUsage::new("test/model", 1000, 500, 1.0, 2.0);
+        let usage = TokenUsage::new("test/model", 1000, 500, 0, 1.0, 2.0);
         tracker.record_usage(usage).unwrap();
 
         let summary = tracker.get_summary().unwrap();
@@ -488,7 +550,7 @@ mod tests {
         let tracker = CostTracker::new(config, tmp.path()).unwrap();
 
         // Record a usage that exceeds the limit
-        let usage = TokenUsage::new("test/model", 10000, 5000, 1.0, 2.0); // ~0.02 USD
+        let usage = TokenUsage::new("test/model", 10000, 5000, 0, 1.0, 2.0); // ~0.02 USD
         tracker.record_usage(usage).unwrap();
 
         let check = tracker.check_budget(0.01).unwrap();
@@ -505,7 +567,7 @@ mod tests {
 
         let old_record = CostRecord::new(
             "old-session",
-            TokenUsage::new("legacy/model", 500, 500, 1.0, 1.0),
+            TokenUsage::new("legacy/model", 500, 500, 0, 1.0, 1.0),
         );
         let mut file = OpenOptions::new()
             .create(true)
@@ -517,7 +579,7 @@ mod tests {
 
         let tracker = CostTracker::new(enabled_config(), tmp.path()).unwrap();
         tracker
-            .record_usage(TokenUsage::new("session/model", 1000, 1000, 1.0, 1.0))
+            .record_usage(TokenUsage::new("session/model", 1000, 1000, 0, 1.0, 1.0))
             .unwrap();
 
         let summary = tracker.get_summary().unwrap();
@@ -534,7 +596,7 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
 
-        let valid_usage = TokenUsage::new("test/model", 1000, 0, 1.0, 1.0);
+        let valid_usage = TokenUsage::new("test/model", 1000, 0, 0, 1.0, 1.0);
         let valid_record = CostRecord::new("session-a", valid_usage.clone());
 
         let mut file = OpenOptions::new()

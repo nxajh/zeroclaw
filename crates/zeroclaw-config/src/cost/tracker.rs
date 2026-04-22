@@ -152,12 +152,28 @@ impl CostTracker {
         let request_count = session_costs.len();
         let by_model = build_session_model_stats(&session_costs);
 
+        let mut total_input = 0u64;
+        let mut total_cached = 0u64;
+        for record in session_costs.iter() {
+            total_input = total_input.saturating_add(record.usage.input_tokens);
+            total_cached = total_cached.saturating_add(record.usage.cached_input_tokens);
+        }
+        let cache_hit_ratio = if total_input == 0 {
+            0.0
+        } else {
+            total_cached as f64 / total_input as f64
+        };
+
         Ok(CostSummary {
             session_cost_usd: session_cost,
             daily_cost_usd: daily_cost,
             monthly_cost_usd: monthly_cost,
             total_tokens,
             request_count,
+            total_input_tokens: total_input,
+            total_cached_tokens: total_cached,
+            total_effective_input_tokens: total_input.saturating_sub(total_cached),
+            cache_hit_ratio,
             by_model,
         })
     }
@@ -244,11 +260,24 @@ fn build_session_model_stats(session_costs: &[CostRecord]) -> HashMap<String, Mo
                 cost_usd: 0.0,
                 total_tokens: 0,
                 request_count: 0,
+                cache_hit_ratio: 0.0,
             });
 
         entry.cost_usd += record.usage.cost_usd;
         entry.total_tokens += record.usage.total_tokens;
         entry.request_count += 1;
+
+        // Update cache_hit_ratio as a running weighted average
+        let prev_total_input = entry
+            .total_tokens
+            .saturating_sub(record.usage.input_tokens);
+        let new_total_input = prev_total_input.saturating_add(record.usage.input_tokens);
+        if new_total_input > 0 {
+            let prev_cached = (entry.cache_hit_ratio * prev_total_input as f64).round() as u64;
+            let new_cached =
+                prev_cached.saturating_add(record.usage.cached_input_tokens);
+            entry.cache_hit_ratio = new_cached as f64 / new_total_input as f64;
+        }
     }
 
     by_model

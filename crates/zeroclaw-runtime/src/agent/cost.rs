@@ -35,6 +35,7 @@ pub fn record_tool_loop_cost_usage(
 ) -> Option<(u64, f64)> {
     let input_tokens = usage.input_tokens.unwrap_or(0);
     let output_tokens = usage.output_tokens.unwrap_or(0);
+    let cached_input = usage.cached_input_tokens.unwrap_or(0);
     let total_tokens = input_tokens.saturating_add(output_tokens);
     if total_tokens == 0 {
         return None;
@@ -58,6 +59,7 @@ pub fn record_tool_loop_cost_usage(
         model,
         input_tokens,
         output_tokens,
+        cached_input,
         pricing.map_or(0.0, |entry| entry.input),
         pricing.map_or(0.0, |entry| entry.output),
     );

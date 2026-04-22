@@ -1,4 +1,5 @@
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
+use crate::agent::model_state::ModelState;
 
 /// CLI channel factory, injected by the binary. Returns a `Box<dyn Channel>` for interactive mode.
 pub static CLI_CHANNEL_FN: std::sync::OnceLock<
@@ -650,6 +651,7 @@ pub async fn agent_turn(
     model_switch_callback: Option<ModelSwitchCallback>,
     channel: Option<&dyn Channel>,
     providers: &[zeroclaw_config::schema::ProviderConfig],
+    model_state: Option<&ModelState>,
 ) -> Result<String> {
     let texts = run_tool_call_loop(
         provider,
@@ -679,6 +681,7 @@ pub async fn agent_turn(
         channel,
         true, // show_reasoning_content: default for legacy callers
         providers,
+        model_state,
     )
     .await
     .map(|texts| texts.join(""))?;
@@ -823,6 +826,7 @@ pub async fn run_tool_call_loop(
     channel: Option<&dyn Channel>,
     show_reasoning_content: bool,
     providers: &[zeroclaw_config::schema::ProviderConfig],
+    model_state: Option<&ModelState>,
 ) -> Result<Vec<String>> {
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
@@ -1009,6 +1013,21 @@ pub async fn run_tool_call_loop(
             } else {
                 (provider, provider_name, model)
             };
+
+        // Pop tool-call entries when warm-up determined this model benefits from it.
+        if let Some(ms) = model_state {
+            if ms.can_pop_tool_calls(provider_name, model) {
+                let before_len = history.len();
+                ms.pop_tool_call_entries(history);
+                let removed = before_len - history.len();
+                if removed > 0 {
+                    tracing::debug!(
+                        removed,
+                        "Popped tool-call entries before API call (can_pop=true)"
+                    );
+                }
+            }
+        }
 
         let prepared_messages =
             multimodal::prepare_messages_for_provider(history, multimodal_config).await?;
@@ -2467,6 +2486,22 @@ pub async fn run(
                 ToolLoopCostTrackingContext::new(tracker, Arc::new(config.cost.prices.clone()))
             });
 
+    // ── Model state (pop decision) ─────────────────────────────────
+    let model_state: Option<ModelState> = match ModelState::load(config.workspace_dir.clone()) {
+        Ok(state) => {
+            // Check if this model needs warm-up; run it once synchronously
+            if !state.can_pop_tool_calls(&provider_name, &model_name) {
+                // warmup internally handles caching/noop on subsequent calls
+                let _ = state.warmup(provider.as_ref(), &provider_name, &model_name).await;
+            }
+            Some(state)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load model_state, pop decisions disabled: {e}");
+            None
+        }
+    };
+
     // ── Execute ──────────────────────────────────────────────────
     let start = Instant::now();
 
@@ -2594,6 +2629,7 @@ pub async fn run(
                         None, // channel: CLI mode — uses prompt_cli
                         config.agent.show_reasoning_content,
                         &config.providers,
+                        model_state.as_ref(),
                     ),
                 )
                 .await
@@ -2624,6 +2660,13 @@ pub async fn run(
 
                         provider_name = new_provider;
                         model_name = new_model;
+
+                        // Warm-up new model if not yet tested
+                        if let Some(ref ms) = model_state {
+                            if !ms.can_pop_tool_calls(&provider_name, &model_name) {
+                                let _ = ms.warmup(provider.as_ref(), &provider_name, &model_name).await;
+                            }
+                        }
 
                         clear_model_switch_request();
 
@@ -2906,6 +2949,7 @@ pub async fn run(
                             None, // channel: interactive CLI — uses prompt_cli
                             config.agent.show_reasoning_content,
                             &config.providers,
+                            model_state.as_ref(),
                         ),
                     )
                     .await
@@ -3420,6 +3464,7 @@ pub async fn process_message(
         None,
         None, // channel: process_message path has no channel ref
         &config.providers,
+        None, // model_state: process_message path does not use model_state
     )
     .await
 }
@@ -4519,6 +4564,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -4577,6 +4623,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect_err("oversized payload must fail");
@@ -4629,6 +4676,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -4680,6 +4728,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect_err("should fail without vision_provider config");
@@ -4738,6 +4787,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect_err("should fail when vision provider cannot be created");
@@ -4796,6 +4846,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("text-only messages should succeed with default provider");
@@ -4855,6 +4906,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect_err("should fail due to nonexistent vision provider");
@@ -4912,6 +4964,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("empty image markers should not trigger vision routing");
@@ -4969,6 +5022,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect_err("should attempt vision provider creation for multiple images");
@@ -5109,6 +5163,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("parallel execution should complete");
@@ -5189,6 +5244,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("cron_add delivery defaults should be injected");
@@ -5261,6 +5317,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("explicit delivery mode should be preserved");
@@ -5328,6 +5385,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -5408,6 +5466,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("non-interactive shell should succeed for low-risk command");
@@ -5478,6 +5537,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("loop should finish with exempt tool executing twice");
@@ -5568,6 +5628,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("loop should complete");
@@ -5632,6 +5693,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("native fallback id flow should complete");
@@ -5723,6 +5785,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("native tool-call text should be relayed through on_delta");
@@ -5791,6 +5854,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("streaming provider should complete");
@@ -5862,6 +5926,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("streaming tool loop should execute tool and finish");
@@ -5940,6 +6005,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("native streaming events should preserve tool loop semantics");
@@ -6027,6 +6093,7 @@ mod tests {
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("routed streaming provider should complete");
@@ -6112,6 +6179,7 @@ mod tests {
                 None,
                 None, // channel
                 &[], // providers
+                None, // model_state
             )
             .await
             .expect("wrapper path should execute activated tools");
@@ -7092,6 +7160,7 @@ Let me check the result."#;
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("tool loop should complete");
@@ -7407,6 +7476,7 @@ Let me check the result."#;
             None, // channel
             true, // show_reasoning_content
             &[], // providers
+            None, // model_state
         )
         .await
         .expect("should succeed without cost scope");

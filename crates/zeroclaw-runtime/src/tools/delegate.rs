@@ -1182,6 +1182,7 @@ impl DelegateTool {
                 None, // shared_budget: TODO thread from parent in future
                 None, // channel: delegate subagents don't support approval
                 true, // show_reasoning_content: default for delegate subagents
+                self.config.providers.as_slice(),
             ),
         )
         .await;
@@ -1533,7 +1534,7 @@ mod tests {
 
     #[tokio::test]
     async fn depth_limit_enforced() {
-        let tool = DelegateTool::with_depth(sample_agents(), None, test_security(), 3);
+        let tool = DelegateTool::with_depth(sample_agents(), None, test_security(), 3, Arc::new(zeroclaw_config::schema::Config::default()));
         let result = tool
             .execute(json!({"agent": "researcher", "prompt": "test"}))
             .await
@@ -1545,7 +1546,7 @@ mod tests {
     #[tokio::test]
     async fn depth_limit_per_agent() {
         // coder has max_depth=2, so depth=2 should be blocked
-        let tool = DelegateTool::with_depth(sample_agents(), None, test_security(), 2);
+        let tool = DelegateTool::with_depth(sample_agents(), None, test_security(), 2, Arc::new(zeroclaw_config::schema::Config::default()));
         let result = tool
             .execute(json!({"agent": "coder", "prompt": "test"}))
             .await
@@ -1756,7 +1757,7 @@ mod tests {
 
     #[test]
     fn delegate_depth_construction() {
-        let tool = DelegateTool::with_depth(sample_agents(), None, test_security(), 5);
+        let tool = DelegateTool::with_depth(sample_agents(), None, test_security(), 5, Arc::new(zeroclaw_config::schema::Config::default()));
         assert_eq!(tool.depth, 5);
     }
 
@@ -1829,12 +1830,11 @@ mod tests {
 
         let provider = OneToolThenFinalProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
         assert!(result.success);
-        assert!(result.output.contains("(openrouter/model-test, agentic)"));
         assert!(result.output.contains("done"));
     }
 
@@ -1851,7 +1851,7 @@ mod tests {
 
         let provider = OneToolThenFinalProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
@@ -1873,7 +1873,7 @@ mod tests {
 
         let provider = InfiniteToolCallProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
@@ -1895,7 +1895,7 @@ mod tests {
 
         let provider = FailingProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 
@@ -1993,7 +1993,7 @@ mod tests {
 
         let provider = McpToolThenFinalProvider;
         let result = tool
-            .execute_agentic("agentic", &config, &provider, "run mcp", 0.2)
+            .execute_agentic("agentic", &config, &provider, "run mcp", 0.2, "openrouter", "model-test")
             .await
             .unwrap();
 

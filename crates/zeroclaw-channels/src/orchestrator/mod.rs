@@ -3032,6 +3032,7 @@ async fn process_channel_message(
                         None, // shared_budget
                         target_channel.as_deref(),
                         ctx.show_reasoning_content,
+                        &ctx.prompt_config.providers,
                     ),
                     ),
                     ),

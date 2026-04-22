@@ -1189,10 +1189,8 @@ mod tests {
         agents.insert(
             "researcher".to_string(),
             DelegateAgentConfig {
-                provider: "ollama".to_string(),
-                model: "llama3".to_string(),
+                model: "ollama/llama3".to_string(),
                 system_prompt: None,
-                api_key: None,
                 temperature: None,
                 max_depth: 3,
                 agentic: false,

@@ -172,6 +172,7 @@ pub async fn run_wizard(force: bool, callbacks: WizardCallbacks) -> Result<Confi
                 Some(api_key)
             },
             base_url: provider_api_url,
+            user_agent: None,
             model: vec![zeroclaw_config::schema::ModelConfig {
                 model_id: model.clone(),
                 ..Default::default()
@@ -452,6 +453,7 @@ fn apply_provider_update(
             Some(api_key)
         },
         base_url: provider_api_url,
+            user_agent: None,
         model: vec![zeroclaw_config::schema::ModelConfig {
             model_id: model.clone(),
             ..Default::default()
@@ -659,6 +661,7 @@ async fn run_quick_setup_with_home(
             api: "openai".to_string(),
             api_key: credential_override.map(|c| c.to_string()),
             base_url: None,
+            user_agent: None,
             model: vec![zeroclaw_config::schema::ModelConfig {
                 model_id: model.clone(),
                 ..Default::default()
@@ -6301,6 +6304,7 @@ mod tests {
             api: "anthropic".into(),
             api_key: None,
             base_url: None,
+            user_agent: None,
             model: vec![],
         });
 
@@ -7863,6 +7867,7 @@ mod tests {
         channels.nextcloud_talk = Some(zeroclaw_config::schema::NextcloudTalkConfig {
             enabled: true,
             base_url: "https://cloud.example.com".into(),
+            user_agent: None,
             app_token: "token".into(),
             webhook_secret: Some("secret".into()),
             allowed_users: vec!["*".into()],

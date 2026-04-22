@@ -743,6 +743,7 @@ fn apply_tui_selections_to_config(app: &App, config: &mut Config) {
             api: "openai".to_string(),
             api_key: api_key.clone(),
             base_url: None,
+            user_agent: None,
             model: vec![],
         }
     });

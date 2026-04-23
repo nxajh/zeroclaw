@@ -257,6 +257,7 @@ enum ChannelRuntimeCommand {
     ShowModel,
     SetModel(String),
     ShowConfig,
+    ShowStatus,
     NewSession,
 }
 
@@ -787,6 +788,7 @@ fn parse_runtime_command(channel_name: &str, content: &str) -> Option<ChannelRun
         "/config" if supports_runtime_model_switch(channel_name) => {
             Some(ChannelRuntimeCommand::ShowConfig)
         }
+        "/status" => Some(ChannelRuntimeCommand::ShowStatus),
         _ => None,
     }
 }
@@ -1728,6 +1730,121 @@ fn build_config_block_kit(
     blocks.to_string()
 }
 
+/// Build a human-readable status snapshot for the `/status` command.
+fn build_status_response(
+    ctx: &ChannelRuntimeContext,
+    msg: &zeroclaw_api::channel::ChannelMessage,
+    current: &ChannelRouteSelection,
+) -> String {
+    let mut s = String::with_capacity(512);
+
+    // ── Version ────────────────────────────────────────────────────
+    let _ = writeln!(s, "🐾 ZeroClaw v{}", env!("CARGO_PKG_VERSION"));
+
+    // ── Model ──────────────────────────────────────────────────────
+    let _ = writeln!(s, "🧠 Model: `{}`", current.route_key);
+
+    // ── Session ────────────────────────────────────────────────────
+    let sender_key = conversation_history_key(msg);
+    let _ = writeln!(s, "🧵 Session: {}", truncate_with_ellipsis(&sender_key, 80));
+
+    // ── History ────────────────────────────────────────────────────
+    let history_count = ctx
+        .conversation_histories
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&sender_key)
+        .map(|h| h.len())
+        .unwrap_or(0);
+    let _ = writeln!(s, "💬 History: {} messages", history_count);
+
+    // ── Cost & Tokens ──────────────────────────────────────────────
+    if let Some(ref cost_state) = ctx.cost_tracking {
+        if let Ok(summary) = cost_state.tracker.get_summary() {
+            let _ = writeln!(
+                s,
+                "🔢 Requests: {} · 💵 Cost: ${:.4} (session) / ${:.4} (today)",
+                summary.request_count, summary.session_cost_usd, summary.daily_cost_usd,
+            );
+
+            let in_tok = summary.total_input_tokens;
+            let out_tok = summary.total_tokens.saturating_sub(summary.total_effective_input_tokens);
+            let cached_tok = summary.total_cached_tokens;
+            let _ = writeln!(
+                s,
+                "📊 Tokens: {} in / {} out / {} cached",
+                format_tokens(in_tok),
+                format_tokens(out_tok),
+                format_tokens(cached_tok),
+            );
+
+            if summary.cache_hit_ratio.is_finite() && summary.total_input_tokens > 0 {
+                let _ = writeln!(
+                    s,
+                    "🗄️ Cache hit: {:.0}%",
+                    summary.cache_hit_ratio * 100.0,
+                );
+            }
+
+            // Per-model breakdown if multiple models used
+            if summary.by_model.len() > 1 {
+                s.push_str("📋 Models:\n");
+                let mut models: Vec<_> = summary.by_model.iter().collect();
+                models.sort_by(|a, b| b.1.cost_usd.partial_cmp(&a.1.cost_usd).unwrap_or(std::cmp::Ordering::Equal));
+                for (model, stats) in models {
+                    let _ = writeln!(
+                        s,
+                        "  `{}`: {} req · ${:.4}",
+                        truncate_with_ellipsis(model, 50),
+                        stats.request_count,
+                        stats.cost_usd,
+                    );
+                }
+            }
+        }
+    } else {
+        s.push_str("💵 Cost tracking: disabled\n");
+    }
+
+    // ── Context budget ─────────────────────────────────────────────
+    if ctx.context_token_budget > 0 {
+        let _ = writeln!(
+            s,
+            "📚 Context budget: {} tokens",
+            format_tokens(ctx.context_token_budget as u64),
+        );
+    }
+
+    // ── Config flags ───────────────────────────────────────────────
+    let _ = writeln!(
+        s,
+        "⚙️ Max iterations: {} · Reasoning: {}",
+        ctx.max_tool_iterations,
+        if ctx.show_reasoning_content { "on" } else { "off" },
+    );
+    let _ = writeln!(
+        s,
+        "🔧 Tools: {}",
+        if ctx.show_tool_calls { "visible" } else { "hidden" },
+    );
+
+    // ── Channel ────────────────────────────────────────────────────
+    let _ = writeln!(s, "📡 Channel: {}", msg.channel);
+
+    s
+}
+
+/// Format a token count with K/M suffix for readability.
+fn format_tokens(count: u64) -> String {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.0)
+    } else if count >= 1_000 {
+        format!("{:.1}K", count as f64 / 1_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
 async fn handle_runtime_command_if_needed(
     ctx: &ChannelRuntimeContext,
     msg: &zeroclaw_api::channel::ChannelMessage,
@@ -1828,6 +1945,9 @@ async fn handle_runtime_command_if_needed(
             }
             mark_sender_for_new_session(ctx, &sender_key);
             "Conversation history cleared. Starting fresh.".to_string()
+        }
+        ChannelRuntimeCommand::ShowStatus => {
+            build_status_response(ctx, msg, &current)
         }
     };
 
@@ -2962,18 +3082,10 @@ async fn process_channel_message(
             let thread_ts = notify_thread_root;
             while let Some(text) = notify_rx.recv().await {
                 if let Some(ref ch) = notify_channel {
-                    // Round text (prefixed with \x00ROUND\x00) is a per-round
-                    // LLM response — send it directly to the user.  All other
-                    // messages are tool-call notifications sent as thread replies
-                    // when show_tool_calls is enabled.
-                    if let Some(round_text) = text.strip_prefix("\x00ROUND\x00") {
-                        let _ = ch
-                            .send(
-                                &SendMessage::new(round_text, &notify_reply_target)
-                                    .in_thread(thread_ts.clone()),
-                            )
-                            .await;
-                    } else if notify_show_tool_calls {
+                    // Skip RoundText events — final response is sent as one
+                    // complete message below.  Only forward tool-call
+                    // notifications when show_tool_calls is enabled.
+                    if !text.starts_with("\x00ROUND\x00") && notify_show_tool_calls {
                         let _ = ch
                             .send(
                                 &SendMessage::new(&text, &notify_reply_target)
@@ -3182,7 +3294,7 @@ async fn process_channel_message(
             }
         }
         LlmExecutionResult::Completed(Ok(Ok(per_round_texts))) => {
-            let full_response = per_round_texts.join("");
+            let full_response = per_round_texts.join("\n\n");
             // ── Hook: on_message_sending (modifying) ─────────
             let mut outbound_response = full_response;
             if let Some(hooks) = &ctx.hooks {
@@ -3362,30 +3474,40 @@ async fn process_channel_message(
                     }
                 } else {
                     // Non-draft channels (WeChat, WhatsApp, etc.):
-                    // Each round's text was already delivered in real-time via
-                    // the RoundText observer event + notify task.  Here we only
-                    // need to send the fallback footer if applicable.
-                    if let Some(fb) = fallback_info.as_ref() {
-                        let req_base = fb.requested_provider.split(':').next().unwrap_or("");
-                        let act_base = fb.actual_provider.split(':').next().unwrap_or("");
-                        let same_family = req_base == act_base
-                            || req_base.starts_with(act_base)
-                            || act_base.starts_with(req_base);
-                        if !same_family {
-                            let footer = format!(
-                                "\n\n---\n⚡ `{}` unavailable — response from **{}** (`{}`)\nSwitch model: /models",
-                                fb.requested_provider, fb.actual_provider, fb.actual_model,
-                            );
-                            if let Err(e) = channel
-                                .send(
-                                    &SendMessage::new(&footer, &msg.reply_target)
-                                        .in_thread(msg.thread_ts.clone())
-                                        .with_cancellation(cancellation_token.clone()),
+                    // Send the full final response as a single message.
+                    let final_text = if !delivered_response.trim().is_empty() {
+                        // Append fallback footer if a different provider family was used.
+                        if let Some(fb) = fallback_info.as_ref() {
+                            let req_base = fb.requested_provider.split(':').next().unwrap_or("");
+                            let act_base = fb.actual_provider.split(':').next().unwrap_or("");
+                            let same_family = req_base == act_base
+                                || req_base.starts_with(act_base)
+                                || act_base.starts_with(req_base);
+                            if !same_family {
+                                format!(
+                                    "{}\n\n---\n⚡ `{}` unavailable — response from **{}** (`{}`)\nSwitch model: /models",
+                                    delivered_response,
+                                    fb.requested_provider, fb.actual_provider, fb.actual_model,
                                 )
-                                .await
-                            {
-                                eprintln!("  ❌ Failed to send fallback footer on {}: {e}", channel.name());
+                            } else {
+                                delivered_response.clone()
                             }
+                        } else {
+                            delivered_response.clone()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    if !final_text.is_empty() {
+                        if let Err(e) = channel
+                            .send(
+                                &SendMessage::new(&final_text, &msg.reply_target)
+                                    .in_thread(msg.thread_ts.clone())
+                                    .with_cancellation(cancellation_token.clone()),
+                            )
+                            .await
+                        {
+                            eprintln!("  ❌ Failed to reply on {}: {e}", channel.name());
                         }
                     }
                 }

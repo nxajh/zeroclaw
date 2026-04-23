@@ -2269,6 +2269,7 @@ pub async fn run(
         &config.model_routes,
         &model_name,
         &provider_runtime_options,
+        &config.providers,
     )?;
 
     let model_switch_callback = get_model_switch_state();
@@ -2487,7 +2488,8 @@ pub async fn run(
             });
 
     // ── Model state (pop decision) ─────────────────────────────────
-    let model_state: Option<ModelState> = match ModelState::load(config.workspace_dir.clone()) {
+    let zeroclaw_dir = config.config_path.parent().unwrap();
+    let model_state: Option<ModelState> = match ModelState::load(zeroclaw_dir.to_path_buf()) {
         Ok(state) => {
             // Check if this model needs warm-up; run it once synchronously
             if !state.can_pop_tool_calls(&provider_name, &model_name) {
@@ -2656,6 +2658,7 @@ pub async fn run(
                             &config.model_routes,
                             &new_model,
                             &provider_runtime_options,
+                            &config.providers,
                         )?;
 
                         provider_name = new_provider;
@@ -2977,6 +2980,7 @@ pub async fn run(
                                 &config.model_routes,
                                 &new_model,
                                 &provider_runtime_options,
+                                &config.providers,
                             )?;
 
                             provider_name = new_provider;
@@ -3261,6 +3265,7 @@ pub async fn process_message(
         &config.model_routes,
         &model_name,
         &provider_runtime_options,
+        &config.providers,
     )?;
 
     let hardware_rag: Option<crate::rag::HardwareRag> = config

@@ -509,6 +509,7 @@ impl Agent {
             &config.model_routes,
             &model_name,
             &provider_runtime_options,
+            &config.providers,
         )?;
 
         let dispatcher_choice = config.agent.tool_dispatcher.as_str();

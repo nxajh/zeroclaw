@@ -1876,6 +1876,7 @@ pub fn create_routed_provider_with_options(
     model_routes: &std::collections::HashMap<String, String>,
     default_model: &str,
     options: &ProviderRuntimeOptions,
+    provider_configs: &[zeroclaw_config::schema::ProviderConfig],
 ) -> anyhow::Result<Box<dyn Provider>> {
     use std::collections::HashSet;
 
@@ -1915,18 +1916,33 @@ pub fn create_routed_provider_with_options(
 
     // Create each provider (with its own resilience wrapper)
     let mut providers: Vec<(String, Box<dyn Provider>)> = Vec::new();
-    for name in needed {
-        // Only use api_url for the primary provider
-        let url = if name == primary_name { api_url } else { None };
-        match create_resilient_provider_with_options(&name, api_key, url, reliability, options) {
+    for name in &needed {
+        let is_primary = name == primary_name;
+        let resolved_key = if is_primary {
+            api_key
+        } else {
+            provider_configs
+                .iter()
+                .find(|c| c.name == *name)
+                .and_then(|c| c.api_key.as_deref())
+        };
+        let resolved_url = if is_primary {
+            api_url
+        } else {
+            provider_configs
+                .iter()
+                .find(|c| c.name == *name)
+                .and_then(|c| c.base_url.as_deref())
+        };
+        match create_resilient_provider_with_options(name, resolved_key, resolved_url, reliability, options) {
             Ok(provider) => providers.push((name.clone(), provider)),
             Err(e) => {
-                if name == primary_name {
+                if is_primary {
                     return Err(e);
                 }
                 tracing::warn!(
                     provider = name.as_str(),
-                    "Ignoring routed provider that failed to initialize"
+                    "Ignoring routed provider that failed to initialize: {e}"
                 );
             }
         }

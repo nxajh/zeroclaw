@@ -1405,13 +1405,12 @@ pub async fn run_tool_call_loop(
         } else {
             parsed_text
         };
-        // Suppress reasoning/thinking content from user-facing output when
-        // configured.  When `content` is empty the provider falls back to
-        // `reasoning_content` for `text`, so we detect that case by comparing.
-        let display_text = if !show_reasoning_content
-            && reasoning_content.as_deref() == Some(display_text.as_str())
+        // When content is empty and reasoning is enabled, show reasoning instead.
+        // (After normalize, content no longer contains reasoning fallback.)
+        let display_text = if display_text.is_empty()
+            && show_reasoning_content
         {
-            String::new()
+            reasoning_content.clone().unwrap_or_default()
         } else {
             display_text
         };

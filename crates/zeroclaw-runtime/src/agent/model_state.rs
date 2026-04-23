@@ -1,32 +1,30 @@
-//! Model runtime state: pop-decision and warm-up for per-model tool-call trimming.
+//! Model runtime state: per-model observations persisted to `~/.zeroclaw/model_state.json`.
 //!
 //! # Overview
 //!
-//! This module tracks per-model runtime observations in `~/.zeroclaw/model_state.json`.
-//! The primary purpose is to determine whether a model caches its prompt based on
-//! the full body hash or on a prefix — which determines whether popping tool-call
-//! entries from the context saves tokens.
+//! This module tracks per-model runtime observations. The file is keyed by
+//! route key (`provider/model`) at the top level, with each entry aggregating
+//! all known state for that model.
 //!
-//! # `can_pop_tool_calls`
+//! # Tracked state
 //!
-//! When `true`, the agent should pop all `tool`-role messages from the conversation
-//! history before each LLM API call. When `false`, popping is skipped because the
-//! model caches the full body hash and popping would break the cache, leading to
-//! equal or higher cost.
+//! ## `can_pop_tool_calls`
 //!
-//! # Warm-up flow
+//! When `true`, the agent should pop all `tool`-role messages from the
+//! conversation history before each LLM API call. When `false`, popping is
+//! skipped because the model caches the full body hash and popping would
+//! break the cache, leading to equal or higher cost.
 //!
-//! The determination is made once via an in-process warm-up test:
+//! Determined via a warm-up test (see `warmup()`).
 //!
-//! 1. Send an API call with a context that includes one tool-call/result pair.
-//! 2. Record `input_before` and `cache_before` from the response usage.
-//! 3. Pop all `tool`-role messages from the context.
-//! 4. Send the same request again (without the tool messages).
-//! 5. Record `input_after` and `cache_after`.
-//! 6. Decide `can_pop_tool_calls` based on whether the cache survived.
+//! ## `content_format`
 //!
-//! The result is persisted to `model_state.json` so subsequent restarts skip the
-//! warm-up step.
+//! Auto-detected content format flags that describe how a model structures
+//! its responses (think tags, native reasoning field, tool-calls in reasoning, etc.).
+//!
+//! These flags are accumulated across conversations — each response may reveal
+//! new format characteristics. Used by the normalize/denormalize pipeline to
+//! correctly separate content, reasoning, and tool-calls.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,11 +43,36 @@ pub const STATE_FILE: &str = "model_state.json";
 /// The on-disk model state file.
 ///
 /// File location: `~/.zeroclaw/model_state.json`
+///
+/// Top-level key is the route key (`provider/model`). Each entry aggregates
+/// all runtime observations for that model.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelStateFile {
-    /// Per-model warm-up results keyed by full `provider/model` name.
+    /// Per-model state keyed by full `provider/model` route key.
+    #[serde(default)]
+    pub models: HashMap<String, ModelEntry>,
+
+    // ── Legacy field (for migration from old format) ───────────────────────
+    /// Old format: `can_pop_tool_calls` as top-level HashMap.
+    /// Kept for deserialization compatibility; migrated to `models` on load.
     #[serde(default)]
     pub can_pop_tool_calls: HashMap<String, ModelPopEntry>,
+}
+
+/// Aggregated runtime state for a single model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelEntry {
+    /// Whether tool-call entries should be popped before each API call.
+    #[serde(default)]
+    pub can_pop_tool_calls: bool,
+
+    /// Detailed measurements from the pop-decision warm-up test.
+    #[serde(default)]
+    pub pop_decision: Option<ModelPopEntry>,
+
+    /// Auto-detected content format flags.
+    #[serde(default)]
+    pub content_format: Option<ContentFormatEntry>,
 }
 
 /// A single model's warm-up result and the measurements that produced it.
@@ -67,27 +90,67 @@ pub struct ModelPopEntry {
     pub cache_after: u64,
 }
 
+/// Auto-detected content format flags for a model.
+///
+/// These flags accumulate over time — each response may reveal new
+/// characteristics about how the model structures its output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContentFormatEntry {
+    /// The API returns a native `reasoning_content` field (separate from `content`).
+    #[serde(default)]
+    pub has_native_reasoning: bool,
+
+    /// Model embeds `<think...</think*>` tags inside `content`.
+    #[serde(default)]
+    pub has_think_tags: bool,
+
+    /// Model places tool-call XML/JSON inside `reasoning_content` or thinking blocks.
+    #[serde(default)]
+    pub has_tool_call_in_reasoning: bool,
+}
+
 // ── In-memory state ───────────────────────────────────────────────────────────
 
 /// Model state tracker backed by `~/.zeroclaw/model_state.json`.
 ///
-/// Callers use `can_pop_tool_calls(provider, model)` to decide whether to trim
-/// tool-role messages from the context. When the answer is unknown, `warmup()`
-/// runs the measurement and records the result.
+/// All reads and writes go through this struct. Provider implementations
+/// query content format for denormalization and report detected format
+/// via `update_content_format()`.
 #[derive(Debug)]
 pub struct ModelState {
     state_path: PathBuf,
-    entries: RwLock<HashMap<String, ModelPopEntry>>,
+    entries: RwLock<HashMap<String, ModelEntry>>,
 }
 
 impl ModelState {
     /// Load or create the state file at `~/.zeroclaw/model_state.json`.
+    ///
+    /// Handles migration from the old format (top-level `can_pop_tool_calls`)
+    /// to the new format (top-level `models` with `ModelEntry` values).
     pub fn load(zeroclaw_dir: PathBuf) -> std::io::Result<Self> {
         let state_path = zeroclaw_dir.join(STATE_FILE);
         let entries = if state_path.exists() {
             let contents = fs::read_to_string(&state_path)?;
             match serde_json::from_str::<ModelStateFile>(&contents) {
-                Ok(f) => f.can_pop_tool_calls,
+                Ok(f) => {
+                    let mut models = f.models;
+
+                    // Migrate old format: can_pop_tool_calls → models
+                    if models.is_empty() && !f.can_pop_tool_calls.is_empty() {
+                        for (key, pop_entry) in &f.can_pop_tool_calls {
+                            models.insert(
+                                key.clone(),
+                                ModelEntry {
+                                    can_pop_tool_calls: pop_entry.can_pop_tool_calls,
+                                    pop_decision: Some((*pop_entry).clone()),
+                                    content_format: None,
+                                },
+                            );
+                        }
+                    }
+
+                    models
+                }
                 Err(_) => HashMap::new(),
             }
         } else {
@@ -103,6 +166,8 @@ impl ModelState {
     pub fn state_path(&self) -> &PathBuf {
         &self.state_path
     }
+
+    // ── Pop-decision queries ───────────────────────────────────────────────
 
     /// Return `true` if `can_pop_tool_calls` is set to `true` for the given model.
     ///
@@ -173,7 +238,7 @@ impl ModelState {
             && cache_after >= cache_before
             && input_after < input_before;
 
-        let entry = ModelPopEntry {
+        let pop_entry = ModelPopEntry {
             can_pop_tool_calls: can_pop,
             input_before,
             cache_before,
@@ -196,13 +261,61 @@ impl ModelState {
         {
             let mut entries = self.entries.write().unwrap();
             let key = format!("{provider_name}/{model}");
-            entries.insert(key, entry.clone());
+            let entry = entries.entry(key).or_default();
+            entry.can_pop_tool_calls = can_pop;
+            entry.pop_decision = Some(pop_entry);
             drop(entries);
             self.flush()?;
         }
 
         Ok(can_pop)
     }
+
+    // ── Content format queries ─────────────────────────────────────────────
+
+    /// Get the content format entry for a model, if it exists.
+    pub fn content_format(&self, provider: &str, model: &str) -> Option<ContentFormatEntry> {
+        let key = format!("{provider}/{model}");
+        if let Ok(entries) = self.entries.read() {
+            if let Some(entry) = entries.get(&key) {
+                return entry.content_format.clone();
+            }
+        }
+        None
+    }
+
+    /// Update content format flags for a model.
+    ///
+    /// This merges new detections with existing flags (OR semantics) — once a
+    /// flag is set to `true`, it stays `true`. The result is persisted to disk.
+    pub fn update_content_format(
+        &self,
+        provider: &str,
+        model: &str,
+        new_flags: &ContentFormatEntry,
+    ) {
+        let key = format!("{provider}/{model}");
+        let mut entries = match self.entries.write() {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        let entry = entries.entry(key).or_default();
+        if let Some(ref mut existing) = entry.content_format {
+            // Merge: OR semantics — once seen, stays true
+            existing.has_native_reasoning |= new_flags.has_native_reasoning;
+            existing.has_think_tags |= new_flags.has_think_tags;
+            existing.has_tool_call_in_reasoning |= new_flags.has_tool_call_in_reasoning;
+        } else {
+            entry.content_format = Some(new_flags.clone());
+        }
+        drop(entries);
+
+        if let Err(e) = self.flush() {
+            tracing::warn!("Failed to persist content_format to model_state.json: {e}");
+        }
+    }
+
+    // ── Internal helpers ───────────────────────────────────────────────────
 
     /// Call `provider.chat()` and extract `(input_tokens, cached_tokens)`.
     async fn call_and_extract_tokens(
@@ -233,7 +346,8 @@ impl ModelState {
     fn flush(&self) -> std::io::Result<()> {
         let entries = self.entries.read().unwrap();
         let file = ModelStateFile {
-            can_pop_tool_calls: entries.clone(),
+            models: entries.clone(),
+            can_pop_tool_calls: HashMap::new(), // old field, now empty after migration
         };
         let dir = self.state_path.parent().unwrap();
         fs::create_dir_all(dir)?;
@@ -242,13 +356,11 @@ impl ModelState {
         Ok(())
     }
 
-    /// Remove tool-role messages and any assistant messages that have no following
-    /// non-tool message from the given message list.
+    /// Remove tool-role messages from the given message list.
     ///
     /// This is the "pop" operation applied before each API call when
     /// `can_pop_tool_calls` returns `true`.
     pub fn pop_tool_call_entries(&self, messages: &mut Vec<ChatMessage>) {
-        // Pass 1: remove tool messages
         let mut i = 0;
         while i < messages.len() {
             if messages[i].role == "tool" {
@@ -310,5 +422,65 @@ mod tests {
         state.pop_tool_call_entries(&mut messages);
         state.pop_tool_call_entries(&mut messages);
         assert_eq!(messages.len(), 3);
+    }
+
+    #[test]
+    fn content_format_merge_or_semantics() {
+        let state = ModelState::load(PathBuf::from("/tmp/zeroclaw_test")).unwrap();
+
+        // First detection: only native reasoning seen
+        state.update_content_format("test", "model-a", &ContentFormatEntry {
+            has_native_reasoning: true,
+            has_think_tags: false,
+            has_tool_call_in_reasoning: false,
+        });
+
+        // Second detection: think tags also seen
+        state.update_content_format("test", "model-a", &ContentFormatEntry {
+            has_native_reasoning: false,
+            has_think_tags: true,
+            has_tool_call_in_reasoning: false,
+        });
+
+        let fmt = state.content_format("test", "model-a").unwrap();
+        assert!(fmt.has_native_reasoning);
+        assert!(fmt.has_think_tags);
+        assert!(!fmt.has_tool_call_in_reasoning);
+    }
+
+    #[test]
+    fn migrate_old_format() {
+        use std::io::Write;
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let state_path = tmp_dir.path().join(STATE_FILE);
+
+        // Write old-format file
+        let old_json = r#"{
+  "can_pop_tool_calls": {
+    "my-provider/my-model": {
+      "can_pop_tool_calls": true,
+      "input_before": 100,
+      "cache_before": 50,
+      "input_after": 80,
+      "cache_after": 50
+    }
+  }
+}"#;
+        let mut f = fs::File::create(&state_path).unwrap();
+        f.write_all(old_json.as_bytes()).unwrap();
+        drop(f);
+
+        let state = ModelState::load(tmp_dir.path().to_path_buf()).unwrap();
+
+        // Old data should be accessible via new API
+        assert!(state.can_pop_tool_calls("my-provider", "my-model"));
+
+        // Flush should write new format
+        state.flush().unwrap();
+        let new_contents = fs::read_to_string(&state_path).unwrap();
+        let parsed: ModelStateFile = serde_json::from_str(&new_contents).unwrap();
+        assert!(parsed.models.contains_key("my-provider/my-model"));
+        // Old field should be empty after migration
+        assert!(parsed.can_pop_tool_calls.is_empty());
     }
 }

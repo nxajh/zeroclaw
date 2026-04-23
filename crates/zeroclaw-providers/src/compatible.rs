@@ -615,29 +615,6 @@ struct Choice {
     message: ResponseMessage,
 }
 
-/// Remove `<think>...</think>` blocks from model output.
-/// Some reasoning models (e.g. MiniMax) embed their chain-of-thought inline
-/// in the `content` field rather than a separate `reasoning_content` field.
-/// The resulting `<think>` tags must be stripped before returning to the user.
-fn strip_think_tags(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut rest = s;
-    loop {
-        if let Some(start) = rest.find("<think>") {
-            result.push_str(&rest[..start]);
-            if let Some(end) = rest[start..].find("</think>") {
-                rest = &rest[start + end + "</think>".len()..];
-            } else {
-                // Unclosed tag: drop the rest to avoid leaking partial reasoning.
-                break;
-            }
-        } else {
-            result.push_str(rest);
-            break;
-        }
-    }
-    result.trim().to_string()
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 struct ResponseMessage {
@@ -657,33 +634,26 @@ impl ResponseMessage {
     /// often return their output solely in `reasoning_content`.
     /// Strips `<think>...</think>` blocks that some models (e.g. MiniMax) embed
     /// inline in `content` instead of using a separate field.
-    fn effective_content(&self) -> String {
+    /// Normalize content by extracting `<think...</think*>` blocks.
+    ///
+    /// Returns `(content, extracted_thinking)`:
+    /// - `content`: visible text with think tags removed (`None` if empty)
+    /// - `extracted_thinking`: text extracted from think tags (`None` if none found)
+    ///
+    /// The caller is responsible for merging `extracted_thinking` into
+    /// `reasoning_content` if appropriate.
+    fn normalize_content(&self) -> (Option<String>, Option<String>) {
         if let Some(content) = self.content.as_ref().filter(|c| !c.is_empty()) {
-            let stripped = strip_think_tags(content);
-            if !stripped.is_empty() {
-                return stripped;
-            }
+            let (stripped, thinking) = crate::normalize::extract_think_tags(content);
+            let content = if stripped.is_empty() {
+                None
+            } else {
+                Some(stripped)
+            };
+            (content, thinking)
+        } else {
+            (None, None)
         }
-
-        self.reasoning_content
-            .as_ref()
-            .map(|c| strip_think_tags(c))
-            .filter(|c| !c.is_empty())
-            .unwrap_or_default()
-    }
-
-    fn effective_content_optional(&self) -> Option<String> {
-        if let Some(content) = self.content.as_ref().filter(|c| !c.is_empty()) {
-            let stripped = strip_think_tags(content);
-            if !stripped.is_empty() {
-                return Some(stripped);
-            }
-        }
-
-        self.reasoning_content
-            .as_ref()
-            .map(|c| strip_think_tags(c))
-            .filter(|c| !c.is_empty())
     }
 }
 
@@ -1685,8 +1655,12 @@ impl OpenAiCompatibleProvider {
     }
 
     fn parse_native_response(message: ResponseMessage) -> ProviderChatResponse {
-        let text = message.effective_content_optional();
-        let reasoning_content = message.reasoning_content.clone();
+        let (text, extracted_thinking) = message.normalize_content();
+        // Merge: API-level reasoning_content takes priority, then fill from extracted think tags
+        let reasoning_content = message
+            .reasoning_content
+            .clone()
+            .or(extracted_thinking);
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()
@@ -1869,10 +1843,10 @@ impl Provider for OpenAiCompatibleProvider {
                     && c.message.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
                 {
                     serde_json::to_string(&c.message)
-                        .unwrap_or_else(|_| c.message.effective_content())
+                        .unwrap_or_else(|_| c.message.normalize_content().0.unwrap_or_default())
                 } else {
-                    // No tool calls, return content (with reasoning_content fallback)
-                    c.message.effective_content()
+                    // No tool calls, return normalized content (reasoning extracted separately)
+                    c.message.normalize_content().0.unwrap_or_default()
                 }
             })
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))
@@ -1969,10 +1943,10 @@ impl Provider for OpenAiCompatibleProvider {
                     && c.message.tool_calls.as_ref().is_some_and(|t| !t.is_empty())
                 {
                     serde_json::to_string(&c.message)
-                        .unwrap_or_else(|_| c.message.effective_content())
+                        .unwrap_or_else(|_| c.message.normalize_content().0.unwrap_or_default())
                 } else {
-                    // No tool calls, return content (with reasoning_content fallback)
-                    c.message.effective_content()
+                    // No tool calls, return normalized content (reasoning extracted separately)
+                    c.message.normalize_content().0.unwrap_or_default()
                 }
             })
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))
@@ -2067,8 +2041,12 @@ impl Provider for OpenAiCompatibleProvider {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))?;
 
-        let text = choice.message.effective_content_optional();
-        let reasoning_content = choice.message.reasoning_content;
+        let (text, extracted_thinking) = choice.message.normalize_content();
+        // Merge: API-level reasoning_content takes priority, then fill from extracted think tags
+        let reasoning_content = choice
+            .message
+            .reasoning_content
+            .or(extracted_thinking);
         let tool_calls = choice
             .message
             .tool_calls
@@ -3225,12 +3203,6 @@ mod tests {
     }
 
     #[test]
-    fn strip_think_tags_drops_unclosed_block_suffix() {
-        let input = "visible<think>hidden";
-        assert_eq!(strip_think_tags(input), "visible");
-    }
-
-    #[test]
     fn native_tool_schema_unsupported_detection_is_precise() {
         assert!(OpenAiCompatibleProvider::is_native_tool_schema_unsupported(
             reqwest::StatusCode::BAD_REQUEST,
@@ -3839,90 +3811,93 @@ mod tests {
         assert_eq!(flattened[1].role, "assistant");
     }
 
-    #[test]
-    fn strip_think_tags_removes_multiple_blocks_with_surrounding_text() {
-        let input = "Answer A <think>hidden 1</think> and B <think>hidden 2</think> done";
-        let output = strip_think_tags(input);
-        assert_eq!(output, "Answer A  and B  done");
-    }
-
-    #[test]
-    fn strip_think_tags_drops_tail_for_unclosed_block() {
-        let input = "Visible<think>hidden tail";
-        let output = strip_think_tags(input);
-        assert_eq!(output, "Visible");
-    }
-
     // ----------------------------------------------------------
-    // Reasoning model fallback tests (reasoning_content)
+    // Reasoning model tests (normalized_content)
     // ----------------------------------------------------------
 
     #[test]
-    fn reasoning_content_fallback_when_content_empty() {
-        // Reasoning models (Qwen3, GLM-4) return content: "" with reasoning_content populated
+    fn normalized_content_empty_when_content_empty_even_with_reasoning() {
+        // Reasoning models (Qwen3, GLM-4) return content: "" with reasoning_content populated.
+        // normalized_content() no longer falls back to reasoning_content.
         let json = r#"{"choices":[{"message":{"content":"","reasoning_content":"Thinking output here"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Thinking output here");
+        assert!(msg.normalize_content().0.is_none());
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Thinking output here"));
     }
 
     #[test]
-    fn reasoning_content_fallback_when_content_null() {
-        // Some models may return content: null with reasoning_content
+    fn normalized_content_none_when_content_null() {
         let json =
             r#"{"choices":[{"message":{"content":null,"reasoning_content":"Fallback text"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Fallback text");
+        assert!(msg.normalize_content().0.is_none());
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Fallback text"));
     }
 
     #[test]
-    fn reasoning_content_fallback_when_content_missing() {
-        // content field absent entirely, reasoning_content present
+    fn normalized_content_none_when_content_missing() {
         let json = r#"{"choices":[{"message":{"reasoning_content":"Only reasoning"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Only reasoning");
+        assert!(msg.normalize_content().0.is_none());
+        assert_eq!(msg.reasoning_content.as_deref(), Some("Only reasoning"));
     }
 
     #[test]
-    fn reasoning_content_not_used_when_content_present() {
-        // Normal model: content populated, reasoning_content should be ignored
+    fn normalized_content_returns_content_when_present() {
         let json = r#"{"choices":[{"message":{"content":"Normal response","reasoning_content":"Should be ignored"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Normal response");
+        assert_eq!(msg.normalize_content().0.as_deref(), Some("Normal response"));
     }
 
     #[test]
-    fn reasoning_content_used_when_content_only_think_tags() {
-        let json = r#"{"choices":[{"message":{"content":"<think>secret</think>","reasoning_content":"Fallback text"}}]}"#;
+    fn normalized_content_strips_think_tags() {
+        let json = r#"{"choices":[{"message":{"content":"visible<think >secret</think >rest","reasoning_content":"Fallback text"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "Fallback text");
-        assert_eq!(
-            msg.effective_content_optional().as_deref(),
-            Some("Fallback text")
-        );
+        // Think tags stripped, reasoning stays separate
+        assert_eq!(msg.normalize_content().0.as_deref(), Some("visible rest"));
     }
 
     #[test]
-    fn reasoning_content_both_absent_returns_empty() {
-        // Neither content nor reasoning_content - returns empty string
+    fn normalized_content_none_when_both_absent() {
         let json = r#"{"choices":[{"message":{}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
-        assert_eq!(msg.effective_content(), "");
+        assert!(msg.normalize_content().0.is_none());
     }
 
     #[test]
-    fn reasoning_content_ignored_by_normal_models() {
-        // Standard response without reasoning_content still works
+    fn normalized_content_works_without_reasoning() {
         let json = r#"{"choices":[{"message":{"content":"Hello from Venice!"}}]}"#;
         let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
         let msg = &resp.choices[0].message;
         assert!(msg.reasoning_content.is_none());
-        assert_eq!(msg.effective_content(), "Hello from Venice!");
+        assert_eq!(msg.normalize_content().0.as_deref(), Some("Hello from Venice!"));
+    }
+
+    #[test]
+    fn normalize_content_extracts_think_tags_as_reasoning() {
+        // Qwen3-style: content has <think/> blocks, no reasoning_content field
+        let json = r#"{"choices":[{"message":{"content":"visiblesecretrest"}}]}"#;
+        let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
+        let msg = &resp.choices[0].message;
+        let (text, thinking) = msg.normalize_content();
+        assert_eq!(text.as_deref(), Some("visible rest"));
+        assert_eq!(thinking.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn normalize_content_no_think_tags_returns_none_reasoning() {
+        let json = r#"{"choices":[{"message":{"content":"Plain text, no tags"}}]}"#;
+        let resp: ApiChatResponse = serde_json::from_str(json).unwrap();
+        let msg = &resp.choices[0].message;
+        let (text, thinking) = msg.normalize_content();
+        assert_eq!(text.as_deref(), Some("Plain text, no tags"));
+        assert!(thinking.is_none());
     }
 
     // ----------------------------------------------------------

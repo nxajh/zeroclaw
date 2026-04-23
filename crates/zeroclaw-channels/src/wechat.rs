@@ -1125,7 +1125,6 @@ impl ApiClient {
     /// Store a context token for a user (called on each inbound message).
     async fn store_context_token(&self, user_id: &str, token: &str) {
         if !token.is_empty() {
-            tracing::debug!(user_id, context_token = token, "wechat: stored context_token");
             self.state
                 .write()
                 .await
